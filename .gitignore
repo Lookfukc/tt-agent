@@ -1,0 +1,27 @@
+# 二进制
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# 测试与覆盖率
+*.out
+coverage.*
+
+# 运行时产物
+runs/
+sessions/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
+ISSUES.md

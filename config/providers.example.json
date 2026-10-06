@@ -1,0 +1,34 @@
+{
+  "providers": [
+    {
+      "id": "my-qwen",
+      "name": "Internal Qwen Gateway",
+      "protocol": "openai",
+      "base_url": "http://llm.internal:8000/v1",
+      "api_key_env": "MY_QWEN_API_KEY",
+      "default_model": "qwen3-72b",
+      "models": [
+        {
+          "id": "qwen3-72b",
+          "name": "Qwen3 72B",
+          "capabilities": {
+            "streaming": true,
+            "tool_calls": true,
+            "thinking": true,
+            "temperature_support": true,
+            "context_window": 131072
+          }
+        },
+        {
+          "id": "qwen3-32b",
+          "name": "Qwen3 32B",
+          "capabilities": {
+            "streaming": true,
+            "tool_calls": true,
+            "context_window": 131072
+          }
+        }
+      ]
+    }
+  ]
+}
