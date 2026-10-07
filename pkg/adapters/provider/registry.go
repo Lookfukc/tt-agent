@@ -83,14 +83,12 @@ type Registry struct {
 	providers map[string]*ProviderConfig
 }
 
-// NewRegistry 构造注册表并装载内置厂商
-// returns: 已含内置配置的注册表
+// NewRegistry 构造空注册表
+//
+// 厂商一律由使用方代码注册，框架不内置目录也不拥有配置文件格式
+// returns: 空注册表
 func NewRegistry() *Registry {
-	r := &Registry{providers: make(map[string]*ProviderConfig)}
-	for i := range BuiltinProviders {
-		r.Register(&BuiltinProviders[i])
-	}
-	return r
+	return &Registry{providers: make(map[string]*ProviderConfig)}
 }
 
 // Register 注册提供商，ID 重复时覆盖

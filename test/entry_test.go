@@ -57,6 +57,11 @@ func (errorMockLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan co
 func newTestServer(t *testing.T, llm core.LLM) *entry.Server {
 	t.Helper()
 	reg := provider.NewRegistry()
+	reg.Register(&provider.ProviderConfig{
+		ID: "deepseek", Name: "Test", Protocol: "openai",
+		BaseURL: "http://127.0.0.1:1/v1", DefaultModel: "deepseek-chat",
+		Models: []provider.ModelConfig{{ID: "deepseek-chat"}},
+	})
 	return entry.NewServer(reg, nil,
 		entry.WithConfig(entry.Config{DefaultProvider: "deepseek"}),
 		entry.WithLLMFactory(func(string) (core.LLM, error) { return llm, nil }),

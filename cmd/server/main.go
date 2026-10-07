@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -16,7 +17,6 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
-	"github.com/Lookfukc/send-agent/pkg/config"
 	"github.com/Lookfukc/send-agent/pkg/entry"
 	"github.com/Lookfukc/send-agent/pkg/tools"
 	"github.com/Lookfukc/send-agent/pkg/tools/builtin"
@@ -25,37 +25,38 @@ import (
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	grpcAddr := flag.String("grpc", "", "gRPC listen address, empty to disable")
-	defaultProvider := flag.String("provider", "deepseek", "default provider id")
+	defaultProvider := flag.String("provider", "main", "provider id label for routing/metrics")
+	protocol := flag.String("protocol", "openai", "llm protocol: openai / anthropic / gemini")
+	baseURL := flag.String("base-url", "", "provider api base url, e.g. https://api.deepseek.com/v1 (required)")
+	apiKeyEnv := flag.String("api-key-env", "", "env var name holding the api key (required, key never lands on flags)")
+	defaultModel := flag.String("model", "", "model id (required)")
 	prompt := flag.String("prompt", "", "default system prompt")
-	configPath := flag.String("config", "", "custom providers json file")
 	enableFetch := flag.Bool("enable-httpfetch", false, "register http_fetch tool (SSRF surface, off by default)")
 	allowPrivate := flag.Bool("httpfetch-allow-private", false, "allow http_fetch to reach private networks")
 	flag.Parse()
 
-	registry := provider.NewRegistry()
-
-	// 自定义厂商配置文件存在则追加注册
-	if *configPath != "" {
-		if _, err := os.Stat(*configPath); err == nil {
-			customs, err := config.LoadProviders(*configPath)
-			if err != nil {
-				log.Fatalf("load config: %v", err)
-			}
-			for i := range customs {
-				registry.Register(&customs[i])
-				log.Printf("registered custom provider: %s", customs[i].ID)
-			}
-		} else {
-			log.Fatalf("config file not found: %s", *configPath)
-		}
+	// 厂商配置即 flag+env，多厂商场景写自己的 main 用注册表装配
+	if *baseURL == "" || *apiKeyEnv == "" || *defaultModel == "" {
+		log.Fatalf("--base-url, --api-key-env and --model are required")
 	}
-
-	// 启动期绑定全部已设密钥，缺失的留在使用时报错
-	for _, id := range registry.List() {
-		cfg, _ := registry.Get(id)
-		if err := cfg.LoadAPIKeyFromEnv(); err != nil {
-			log.Printf("skip provider %s: %v", id, err)
-		}
+	switch *protocol {
+	case "openai", "anthropic", "gemini":
+	default:
+		log.Fatalf("unsupported protocol %q (want one of openai/anthropic/gemini)", *protocol)
+	}
+	u, err := url.Parse(*baseURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		log.Fatalf("--base-url must be absolute http(s) URL: %s", *baseURL)
+	}
+	registry := provider.NewRegistry()
+	registry.Register(&provider.ProviderConfig{
+		ID: *defaultProvider, Name: *defaultProvider, Protocol: *protocol,
+		BaseURL: *baseURL, APIKeyEnv: *apiKeyEnv, DefaultModel: *defaultModel,
+		Models: []provider.ModelConfig{{ID: *defaultModel}},
+	})
+	// 单厂商服务缺密钥必坏，装配期即报
+	if err := registry.MustGet(*defaultProvider).LoadAPIKeyFromEnv(); err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	toolReg := tools.NewRegistry()

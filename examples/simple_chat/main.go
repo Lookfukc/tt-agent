@@ -15,13 +15,51 @@ import (
 	"github.com/Lookfukc/send-agent/pkg/tools"
 )
 
+// 厂商配置即代码：需要几家写几家，行为偏差用命名 quirks，
+// 密钥一律走环境变量（APIKeyEnv），不落代码
+func buildProviders() []provider.ProviderConfig {
+	deepseekQuirks, _ := provider.ComposeQuirks([]string{"deepseek-reasoner"}, "openai")
+	glmQuirks, _ := provider.ComposeQuirks([]string{"glm-thinking"}, "openai")
+	return []provider.ProviderConfig{
+		{
+			ID: "deepseek", Name: "DeepSeek", Protocol: "openai",
+			BaseURL: "https://api.deepseek.com/v1", APIKeyEnv: "DEEPSEEK_API_KEY",
+			DefaultModel: "deepseek-chat", Quirks: deepseekQuirks,
+			Models: []provider.ModelConfig{
+				{
+					ID: "deepseek-chat", Name: "DeepSeek V3",
+					Capabilities:      provider.ModelCapabilities{Streaming: true, ToolCalls: true, TemperatureSupport: true, ContextWindow: 64_000},
+					InputPricePerMtok: 0.28, OutputPricePerMtok: 1.10,
+				},
+			},
+		},
+		{
+			ID: "glm", Name: "Zhipu AI", Protocol: "openai",
+			BaseURL: "https://open.bigmodel.cn/api/paas/v4", APIKeyEnv: "GLM_API_KEY",
+			DefaultModel: "glm-4.6", Quirks: glmQuirks,
+			Models: []provider.ModelConfig{
+				{
+					ID: "glm-4.6", Name: "GLM-4.6",
+					Capabilities:      provider.ModelCapabilities{Streaming: true, ToolCalls: true, Thinking: true, TemperatureSupport: true, ContextWindow: 200_000},
+					InputPricePerMtok: 1.10, OutputPricePerMtok: 2.21,
+				},
+			},
+		},
+	}
+}
+
 func main() {
-	providerID := "deepseek"
+	customs := buildProviders()
+	registry := provider.NewRegistry()
+	for i := range customs {
+		registry.Register(&customs[i])
+	}
+
+	// 默认取首个厂商，AGENT_PROVIDER 显式覆盖
+	providerID := customs[0].ID
 	if v := os.Getenv("AGENT_PROVIDER"); v != "" {
 		providerID = v
 	}
-
-	registry := provider.NewRegistry()
 	cfg, ok := registry.Get(providerID)
 	if !ok {
 		fmt.Fprintf(os.Stderr, "unknown provider: %s\n", providerID)

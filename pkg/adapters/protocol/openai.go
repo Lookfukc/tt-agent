@@ -15,15 +15,18 @@ import (
 	"github.com/Lookfukc/send-agent/pkg/core"
 )
 
+// PatchFunc 请求体修补函数
+// body: 待发送的请求体，in place 修改
+// req: 原始统一请求，含 Thinking/Extra 等未落入 body 的信息
+type PatchFunc func(body map[string]any, req core.ChatRequest)
+
 // Quirks 同一 OpenAI 协议下各提供商的偏差修正点
 //
 // 厂商偏差集中在两处：请求体需要额外字段或删减字段；响应中
 // 私有扩展字段。以 hook 形式注入而非派生子类，新厂商零代码接入
 type Quirks struct {
 	// PatchRequest 请求体序列化前的修补，body 为顶层 map，可直接增删字段
-	// body: 待发送的请求体，in place 修改
-	// req: 原始统一请求，含 Thinking/Extra 等未落入 body 的信息
-	PatchRequest func(body map[string]any, req core.ChatRequest)
+	PatchRequest PatchFunc
 
 	// DisableStreamUsage 部分提供商不认 stream_options 字段时置 true
 	DisableStreamUsage bool

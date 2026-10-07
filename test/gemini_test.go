@@ -179,15 +179,20 @@ func TestH6GeminiParallelToolCallsStream(t *testing.T) {
 }
 
 func TestFactoryProtocols(t *testing.T) {
-	registry := provider.NewRegistry()
-	for _, id := range []string{"kimi", "glm", "anthropic", "gemini", "deepseek"} {
-		cfg, ok := registry.Get(id)
-		if !ok {
-			t.Fatalf("provider %s not registered", id)
+	// 三协议合成配置，验证 factory 按协议装配；厂商一律来自配置，注册表不内置
+	configs := []provider.ProviderConfig{
+		{ID: "t-openai", Name: "OpenAI 兼容", Protocol: "openai", BaseURL: "http://127.0.0.1:1/v1"},
+		{ID: "t-anthropic", Name: "Anthropic", Protocol: "anthropic", BaseURL: "http://127.0.0.1:1"},
+		{ID: "t-gemini", Name: "Gemini", Protocol: "gemini", BaseURL: "http://127.0.0.1:1"},
+	}
+	for i := range configs {
+		configs[i].SetAPIKey("test-key")
+		if _, err := adapters.NewLLM(&configs[i]); err != nil {
+			t.Errorf("factory %s: %v", configs[i].ID, err)
 		}
-		cfg.SetAPIKey("test-key")
-		if _, err := adapters.NewLLM(cfg); err != nil {
-			t.Errorf("factory %s: %v", id, err)
-		}
+	}
+	// 空注册表不再内置厂商
+	if ids := provider.NewRegistry().List(); len(ids) != 0 {
+		t.Errorf("empty registry has providers: %v", ids)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -144,18 +143,4 @@ func TestRound2LE2ControlFrameRules(t *testing.T) {
 // ping 帧经 writeFrame 持写锁写出，与 pong/close/事件帧串行化。
 func TestRound2WSServerPingKeepalive(t *testing.T) {
 	t.Skip("60s ping 周期无法在测试时限内观测，黑盒无短周期注入口")
-}
-
-// TestRound2M_E7DuplicateProviderID 同一配置文件内重复 provider ID 必须装配期拒绝
-func TestRound2M_E7DuplicateProviderID(t *testing.T) {
-	raw := `{"providers":[` +
-		`{"id":"p1","protocol":"openai","base_url":"http://a","api_key_env":"K","models":[{"id":"m1"}]},` +
-		`{"id":"p1","protocol":"openai","base_url":"http://b","api_key_env":"K","models":[{"id":"m2"}]}]}`
-	err := loadProvidersForTest(writeTemp(t, raw))
-	if err == nil {
-		t.Fatal("M-E7 余量: want duplicate id rejection")
-	}
-	if !strings.Contains(err.Error(), "p1") {
-		t.Errorf("error should name the duplicate id: %v", err)
-	}
 }

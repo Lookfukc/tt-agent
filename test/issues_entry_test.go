@@ -3,14 +3,9 @@ package test
 import (
 	"net"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/Lookfukc/send-agent/pkg/config"
-	"github.com/Lookfukc/send-agent/pkg/entry"
 )
 
 // writeUnmasked 发送不带掩码位的帧（协议违规形态）
@@ -31,24 +26,6 @@ func dialRaw(t *testing.T, url string) net.Conn {
 		t.Fatalf("dial: %v", err)
 	}
 	return conn
-}
-
-// writeTemp 写临时配置文件
-// returns: 文件路径
-func writeTemp(t *testing.T, content string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "providers.json")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	return path
-}
-
-// loadProvidersForTest 配置加载直通
-// returns: 加载错误
-func loadProvidersForTest(path string) error {
-	_, err := config.LoadProviders(path)
-	return err
 }
 
 // TestM_E3UnmaskedFrameRejected 未掩码客户端帧必须拒绝（RFC6455 §5.1）
@@ -103,21 +80,5 @@ func TestM_E5BodyLimit(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 400 {
 		t.Errorf("M-E5: status = %d, want 400", resp.StatusCode)
-	}
-}
-
-// TestM_E7ConfigValidation 协议/scheme/默认模型/内置冲突全部装配期拦截
-func TestM_E7ConfigValidation(t *testing.T) {
-	cases := map[string]string{
-		"protocol":  `{"providers":[{"id":"p1","protocol":"bad","base_url":"http://a","api_key_env":"K","models":[{"id":"m1"}]}]}`,
-		"scheme":    `{"providers":[{"id":"p1","protocol":"openai","base_url":"ftp://a","api_key_env":"K","models":[{"id":"m1"}]}]}`,
-		"model":     `{"providers":[{"id":"p1","protocol":"openai","base_url":"http://a","api_key_env":"K","default_model":"nope","models":[{"id":"m1"}]}]}`,
-		"builtinID": `{"providers":[{"id":"glm","protocol":"openai","base_url":"http://a","api_key_env":"K","models":[{"id":"m1"}]}]}`,
-	}
-	_ = entry.WithConfig
-	for name, raw := range cases {
-		if err := loadProvidersForTest(writeTemp(t, raw)); err == nil {
-			t.Errorf("M-E7 %s: want validation error", name)
-		}
 	}
 }
