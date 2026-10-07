@@ -1,4 +1,4 @@
-module github.com/Lookfukc/send-agent
+module github.com/Lookfukc/tt-agent
 
 go 1.25.0
 

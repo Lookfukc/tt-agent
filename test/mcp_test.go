@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/tools"
-	"github.com/Lookfukc/send-agent/pkg/tools/mcp"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/tools/mcp"
 )
 
 // duplex 拼接两条单向管道成双向传输

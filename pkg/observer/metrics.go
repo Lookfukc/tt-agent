@@ -4,7 +4,7 @@ package observer
 import (
 	"sync"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // Stats 单提供商聚合指标

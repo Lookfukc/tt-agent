@@ -4,9 +4,9 @@ package adapters
 import (
 	"fmt"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/protocol"
-	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/protocol"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // NewLLM 按提供商配置装配 LLM 实例

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/tools/mcp"
+	"github.com/Lookfukc/tt-agent/pkg/tools/mcp"
 )
 
 // TestMCPHTTPEchoSession Streamable HTTP：JSON 与 SSE 两种响应、会话头续用

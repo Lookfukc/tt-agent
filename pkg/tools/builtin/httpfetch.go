@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // maxFetchBytes 响应体上限，超长截断防记忆爆窗
@@ -132,7 +132,7 @@ func (f *HTTPFetch) Execute(ctx context.Context, args json.RawMessage) (core.Too
 		if err != nil {
 			return core.ToolResult{}, err
 		}
-		req.Header.Set("User-Agent", "send-agent/0.1")
+		req.Header.Set("User-Agent", "tt-agent/0.1")
 		resp, err = f.client.Do(req)
 		if err != nil {
 			return core.ToolResult{}, err

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // countingLLM 计数并按脚本返回

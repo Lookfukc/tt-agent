@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // TraceSpan 已结束或进行中的 span 快照

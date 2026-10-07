@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // streamCallLLM 统计 ChatStream 被调次数

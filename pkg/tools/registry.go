@@ -6,7 +6,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // Registry 工具注册表，并发安全

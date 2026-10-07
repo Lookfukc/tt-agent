@@ -11,7 +11,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // Persistent JSONL 落盘的会话记忆

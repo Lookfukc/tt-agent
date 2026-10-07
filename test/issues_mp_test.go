@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/protocol"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/protocol"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // TestM_P1AnthropicThinkingDropsTemperature 思考开启时必须丢弃采样参数

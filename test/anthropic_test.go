@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/protocol"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/protocol"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 func TestAnthropicChat(t *testing.T) {

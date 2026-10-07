@@ -9,8 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/protocol"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/protocol"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // probeBody 起一个捕获请求体的服务并返回固定响应

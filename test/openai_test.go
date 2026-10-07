@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/protocol"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/protocol"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // serveSSE 起一个按行返回 SSE 的测试服务

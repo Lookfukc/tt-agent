@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/tools"
-	"github.com/Lookfukc/send-agent/pkg/tools/builtin"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
 
 func TestCalculator(t *testing.T) {

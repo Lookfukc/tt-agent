@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/tools"
-	"github.com/Lookfukc/send-agent/pkg/tools/mcp"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/tools/mcp"
 )
 
 // fakeMCPServerExt 可编程假服务器：记录 initialize 次数、可注入服务器请求

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // flakyLLM 前 failN 次返回可重试错误，之后成功

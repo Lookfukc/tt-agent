@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/agent"
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
-	"github.com/Lookfukc/send-agent/pkg/orchestrator"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/orchestrator"
 )
 
 // scriptedTurnsLLM 按调用次数返回预设内容

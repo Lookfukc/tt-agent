@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // GeminiProtocol Google Gemini API 适配器

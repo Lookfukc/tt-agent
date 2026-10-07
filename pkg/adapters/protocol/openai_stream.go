@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // streamChunk 单个 SSE data 行对应的 JSON 增量

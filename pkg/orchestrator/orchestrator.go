@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/agent"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // ErrCheckpoint 工作流停在人工检查点，等待 Resume

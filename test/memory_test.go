@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
 )
 
 func TestPersistentSurvivesRestart(t *testing.T) {

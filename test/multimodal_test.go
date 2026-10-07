@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/protocol"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/protocol"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 const dataURI = "data:image/png;base64,aGVsbG8="

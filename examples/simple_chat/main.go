@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters"
-	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
-	"github.com/Lookfukc/send-agent/pkg/agent"
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
-	"github.com/Lookfukc/send-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/adapters"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
 // 厂商配置即代码：需要几家写几家，行为偏差用命名 quirks，

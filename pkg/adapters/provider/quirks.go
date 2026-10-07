@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/protocol"
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/protocol"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // quirkEntry 命名 quirks 条目：补丁函数 + 适用协议

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
 )
 
 // assertNoOrphanTool 校验历史中每条 tool 消息前都有携带对应 tool_call 的父 assistant

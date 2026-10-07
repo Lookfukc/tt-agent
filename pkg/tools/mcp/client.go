@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // protocolVersion 握手版本
@@ -92,7 +92,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	raw, err := c.request(ctx, "initialize", map[string]any{
 		"protocolVersion": protocolVersion,
 		"capabilities":    map[string]any{},
-		"clientInfo":      map[string]any{"name": "send-agent", "version": "0.1"},
+		"clientInfo":      map[string]any{"name": "tt-agent", "version": "0.1"},
 	})
 	if err != nil {
 		return fmt.Errorf("mcp %s initialize: %w", c.name, err)

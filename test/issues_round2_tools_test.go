@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/tools/builtin"
+	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
 
 // TestRound2N14CalculatorRejectsNonFinite 非有限结果必须显式报错

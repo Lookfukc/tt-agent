@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // ChatStream 发送流式对话请求

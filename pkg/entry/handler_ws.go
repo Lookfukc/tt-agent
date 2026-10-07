@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/Lookfukc/send-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
 )
 
 // handleChatWS WebSocket 对话入口

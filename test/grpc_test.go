@@ -11,8 +11,8 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/entry"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/entry"
 )
 
 // newGRPCPair 启动 bufconn 上的 gRPC 服务并返回客户端连接

@@ -1,4 +1,4 @@
-# send-agent
+# tt-agent
 
 基于Go 实现的多协议 LLM Agent 框架，统一内部消息类型，协议适配层兼容 OpenAI / Anthropic / Gemini 三家协议及一切 OpenAI-compatible 提供商（DeepSeek、GLM、Kimi、本地 ollama/vLLM……）。
 
@@ -27,7 +27,7 @@
 
 ```bash
 # 拉依赖
-go get github.com/Lookfukc/send-agent
+go get github.com/Lookfukc/tt-agent
 ```
 
 ## 核心概念
@@ -68,12 +68,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters"
-	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
-	"github.com/Lookfukc/send-agent/pkg/agent"
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
-	"github.com/Lookfukc/send-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/adapters"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
 func main() {
@@ -243,7 +243,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
 )
 
 type providerYAML struct {
@@ -359,7 +359,7 @@ _ = cfg.LoadAPIKeyFromEnv()
 
 ```bash
 export DEEPSEEK_API_KEY=sk-xxx
-go run github.com/Lookfukc/send-agent/cmd/server@latest --addr :8080 \
+go run github.com/Lookfukc/tt-agent/cmd/server@latest --addr :8080 \
   --protocol openai \
   --base-url https://api.deepseek.com/v1 \
   --model deepseek-chat \

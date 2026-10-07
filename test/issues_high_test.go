@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/agent"
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
-	"github.com/Lookfukc/send-agent/pkg/tools"
-	"github.com/Lookfukc/send-agent/pkg/tools/builtin"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
 
 // usageScriptedLLM 按轮返回预设消息并附带用量

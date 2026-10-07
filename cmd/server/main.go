@@ -16,10 +16,10 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
-	"github.com/Lookfukc/send-agent/pkg/entry"
-	"github.com/Lookfukc/send-agent/pkg/tools"
-	"github.com/Lookfukc/send-agent/pkg/tools/builtin"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/entry"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
 
 func main() {

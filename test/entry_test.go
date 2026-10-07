@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/entry"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/entry"
 )
 
 // streamMockLLM 返回固定文本流的 mock

@@ -7,10 +7,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/agent"
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
-	"github.com/Lookfukc/send-agent/pkg/observer"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/observer"
 )
 
 // captureLLM 记录收到的请求并按脚本回复，可附带用量事件

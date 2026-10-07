@@ -5,7 +5,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // roughTokens 保守估算系数

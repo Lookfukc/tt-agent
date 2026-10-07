@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // anthropicStreamEvent 流事件载荷

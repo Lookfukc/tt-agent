@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // emptyCleanLLM 返回干净但无内容的流（OpenAI 空补全形态：

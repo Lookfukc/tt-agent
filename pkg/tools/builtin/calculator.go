@@ -10,7 +10,7 @@ import (
 	"go/token"
 	"math"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // Calculator 四则运算与取模计算器

@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // PatchFunc 请求体修补函数

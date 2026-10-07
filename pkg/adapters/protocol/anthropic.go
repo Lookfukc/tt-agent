@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
 // anthropicVersion API 版本号，Anthropic 强制要求随请求携带

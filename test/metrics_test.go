@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/observer"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/observer"
 )
 
 // errFake 测试用错误

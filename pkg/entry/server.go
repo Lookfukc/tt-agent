@@ -6,13 +6,13 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/Lookfukc/send-agent/pkg/adapters"
-	"github.com/Lookfukc/send-agent/pkg/adapters/provider"
-	"github.com/Lookfukc/send-agent/pkg/agent"
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/memory"
-	"github.com/Lookfukc/send-agent/pkg/observer"
-	"github.com/Lookfukc/send-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/adapters"
+	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/agent"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/observer"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
 // Config 服务配置

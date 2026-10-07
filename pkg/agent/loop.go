@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Lookfukc/send-agent/pkg/core"
-	"github.com/Lookfukc/send-agent/pkg/tools"
+	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
 // ErrMaxIterations 迭代熔断错误
