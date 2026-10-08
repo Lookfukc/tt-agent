@@ -13,15 +13,15 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/tools/mcp"
 )
 
-// fakeMCPServerExt 可编程假服务器：记录 initialize 次数、可注入服务器请求
+// fakeMCPServerExt is a programmable fake server: records initialize count, can inject server-initiated requests
 type fakeMCPServerExt struct {
 	mu        sync.Mutex
 	initCalls int
-	// ServerRequest 在首个 tools/list 前注入一条服务器主动请求（id 撞 1）
+	// ServerRequest injects one server-initiated request (with id colliding with 1) before the first tools/list
 	ServerRequest string
 }
 
-// serve 应答并按需注入服务器请求
+// serve answers requests and injects server requests as configured
 func (s *fakeMCPServerExt) serve(rw io.ReadWriteCloser) {
 	scanner := bufio.NewScanner(rw)
 	encoder := json.NewEncoder(rw)
@@ -40,7 +40,7 @@ func (s *fakeMCPServerExt) serve(rw io.ReadWriteCloser) {
 			calls := s.initCalls
 			s.mu.Unlock()
 			if calls > 1 {
-				// 严格服务器：第二次 initialize 直接报协议错误
+				// Strict server: a second initialize immediately returns a protocol error
 				_ = encoder.Encode(map[string]any{
 					"jsonrpc": "2.0", "id": req.ID,
 					"error": map[string]any{"code": -32600, "message": "Server already initialized"},
@@ -64,7 +64,7 @@ func (s *fakeMCPServerExt) serve(rw io.ReadWriteCloser) {
 			inject := s.ServerRequest
 			s.mu.Unlock()
 			if inject != "" {
-				// 服务器主动请求：官方 SDK 的 id 也从 1 起，与客户端首请求撞号
+				// Server-initiated request: the official SDK's ids also start at 1, colliding with the client's first request id
 				_, _ = rw.Write([]byte(inject + "\n"))
 			}
 			_ = encoder.Encode(map[string]any{
@@ -82,7 +82,7 @@ func (s *fakeMCPServerExt) serve(rw io.ReadWriteCloser) {
 	}
 }
 
-// initCallsCount 线程安全读取握手次数
+// initCallsCount reads the handshake count thread-safely
 func (s *fakeMCPServerExt) initCallsCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,7 +99,7 @@ func newMCPPairExt(t *testing.T) (*mcp.Client, *fakeMCPServerExt) {
 	return client, server
 }
 
-// TestM_F4ConnectIdempotent Register 不得二次 initialize（严格服务器必报错）
+// TestM_F4ConnectIdempotent verifies Register must not initialize a second time (a strict server would error out)
 func TestM_F4ConnectIdempotent(t *testing.T) {
 	ctx := context.Background()
 	client, server := newMCPPairExt(t)
@@ -108,7 +108,7 @@ func TestM_F4ConnectIdempotent(t *testing.T) {
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	// ConnectStdio + Register 组合在旧实现里会再握手一次
+	// The ConnectStdio + Register combination in the old implementation performed an extra handshake
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("second Connect must be idempotent: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestM_F4ConnectIdempotent(t *testing.T) {
 		t.Fatalf("M-F4: initialize called %d times, want 1", server.initCallsCount())
 	}
 
-	// 走一遍 Register 路径（内部还会调 Connect）
+	// Exercise the Register path too (it also calls Connect internally)
 	reg := tools.NewRegistry()
 	if err := client.Register(ctx, reg); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -126,13 +126,13 @@ func TestM_F4ConnectIdempotent(t *testing.T) {
 	}
 }
 
-// TestM_F6ServerRequestNotConsumed 服务器主动请求撞 id 不得被当响应
+// TestM_F6ServerRequestNotConsumed verifies a server-initiated request with a colliding id must not be treated as a response
 func TestM_F6ServerRequestNotConsumed(t *testing.T) {
 	ctx := context.Background()
 	client, server := newMCPPairExt(t)
 	defer client.Close()
 
-	// 注入一条 id=1 的服务器请求（roots/list），与客户端首个请求 id 相同
+	// Inject a server request with id=1 (roots/list), identical to the client's first request id
 	server.mu.Lock()
 	server.ServerRequest = `{"jsonrpc":"2.0","id":1,"method":"roots/list"}`
 	server.mu.Unlock()
@@ -149,16 +149,16 @@ func TestM_F6ServerRequestNotConsumed(t *testing.T) {
 	}
 }
 
-// TestM_F2ReaderExitWakesWaiters 读循环退出后新请求不得永久挂起
+// TestM_F2ReaderExitWakesWaiters verifies new requests must not hang forever after the read loop exits
 func TestM_F2ReaderExitWakesWaiters(t *testing.T) {
 	cRead, cWrite := io.Pipe()
 	_, sWrite := io.Pipe()
 	client := mcp.NewClient(duplex{r: cRead, w: sWrite}, "dead")
-	// 服务器什么都不回，直接关闭读端 → 读循环 EOF 退出
+	// The server replies nothing; close the read end directly → the read loop exits on EOF
 	_ = cWrite.Close()
 	_ = sWrite.Close()
 
-	// 给读循环退出留时间
+	// Give the read loop time to exit
 	time.Sleep(100 * time.Millisecond)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -173,7 +173,7 @@ func TestM_F2ReaderExitWakesWaiters(t *testing.T) {
 		if err == nil {
 			t.Fatal("M-F2: request after reader exit unexpectedly succeeded")
 		}
-		// 预期快速失败，而不是挂到 ctx 超时
+		// Expect a fast failure, not hanging until the ctx timeout
 	case <-time.After(1 * time.Second):
 		t.Fatal("M-F2: request hangs forever after reader loop exited")
 	}

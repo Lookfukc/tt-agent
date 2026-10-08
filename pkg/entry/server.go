@@ -1,9 +1,12 @@
-// Package entry 提供 HTTP/SSE 入口层，将请求转接给 Agent 循环
+// Package entry provides the HTTP/SSE entry layer, forwarding requests
+// into the Agent loop.
 package entry
 
 import (
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/Lookfukc/tt-agent/pkg/adapters"
@@ -15,7 +18,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
-// Config 服务配置
+// Config is the server configuration.
 type Config struct {
 	Addr            string
 	DefaultProvider string
@@ -25,7 +28,7 @@ type Config struct {
 	TokenBudget     int64
 }
 
-// defaultConfig 未填字段的缺省值
+// defaultConfig returns defaults for unset fields.
 func defaultConfig() Config {
 	return Config{
 		Addr:          ":8080",
@@ -34,10 +37,10 @@ func defaultConfig() Config {
 	}
 }
 
-// LLMFactory 按 providerID 装配 LLM，测试注入 mock 用
+// LLMFactory assembles an LLM by providerID; used by tests to inject mocks.
 type LLMFactory func(providerID string) (core.LLM, error)
 
-// Server HTTP 入口
+// Server is the HTTP entry point.
 type Server struct {
 	cfg      Config
 	registry *provider.Registry
@@ -49,23 +52,24 @@ type Server struct {
 	mu   sync.RWMutex
 	llms map[string]core.LLM
 
-	// 劫持的 WS 连接不在 http.Server.Shutdown 管辖内，
-	// 需自行登记才能在优雅关闭时收尾
+	// Hijacked WS connections are outside http.Server.Shutdown's
+	// purview; they must be tracked manually so they can be wrapped
+	// up during graceful shutdown.
 	wsMu   sync.Mutex
 	wsCons map[*wsConn]struct{}
 }
 
-// NewServer 构造服务
-// registry: 提供商注册表
-// toolReg: 工具注册表，可为 nil
-// opts: 覆盖默认配置
-// returns: 服务实例
+// NewServer constructs the server.
+// registry: the provider registry.
+// toolReg: the tool registry; may be nil.
+// opts: overrides for the default configuration.
+// returns: the server instance.
 func NewServer(registry *provider.Registry, toolReg *tools.Registry, opts ...Option) *Server {
 	cfg := defaultConfig()
 	s := &Server{
 		cfg:      cfg,
 		registry: registry,
-		mem:      memory.NewBuffer(nil),
+		mem:      defaultMemory(),
 		tools:    toolReg,
 		llms:     make(map[string]core.LLM),
 		metrics:  observer.NewMetrics(),
@@ -83,26 +87,57 @@ func NewServer(registry *provider.Registry, toolReg *tools.Registry, opts ...Opt
 	return s
 }
 
-// Option 服务配置项
+// Option is a server configuration option.
 type Option func(*Server)
 
-// WithConfig 覆盖服务配置
+// WithConfig overrides the server configuration.
 func WithConfig(cfg Config) Option {
 	return func(s *Server) { s.cfg = cfg }
 }
 
-// WithMemory 替换记忆实现
+// WithMemory replaces the memory implementation.
 func WithMemory(mem core.Memory) Option {
 	return func(s *Server) { s.mem = mem }
 }
 
-// WithLLMFactory 替换 LLM 装配，测试注入点
+// DefaultMemoryDir returns the default session memory directory.
+//
+// The fixed subdirectory guarantees sessions survive restarts on the
+// same machine; when multiple distinct applications on the same
+// machine share the default, they share this directory — for
+// production deployments, use WithMemory to designate a dedicated one.
+func DefaultMemoryDir() string {
+	return filepath.Join(os.TempDir(), "tt-agent-sessions")
+}
+
+// defaultMemLoaded is the cap on resident sessions in default memory.
+//
+// Memory usage depends only on the number of "concurrently active
+// sessions", not on the total volume of historical sessions.
+const defaultMemLoaded = 1024
+
+// defaultMemory builds the default memory: temp-dir persistence + an
+// LRU residency cap.
+//
+// Process memory is no longer the default (lost on restart, unbounded
+// growth); if the temp directory is unusable we panic outright — this
+// is an environment error, and exposing it at assembly time beats
+// silent degradation at run time.
+func defaultMemory() core.Memory {
+	p, err := memory.NewPersistentWithLRU(DefaultMemoryDir(), nil, defaultMemLoaded)
+	if err != nil {
+		panic("tt-agent: init default memory dir: " + err.Error())
+	}
+	return p
+}
+
+// WithLLMFactory replaces LLM assembly; a test injection point.
 func WithLLMFactory(f LLMFactory) Option {
 	return func(s *Server) { s.newLLM = f }
 }
 
-// Handler 返回路由挂载后的 http.Handler
-// returns: 可直接交给 http.Server 的处理器
+// Handler returns the http.Handler with routes mounted.
+// returns: a handler ready to hand to http.Server.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
@@ -113,29 +148,30 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Metrics 暴露指标聚合器，供外部采集
-// returns: 聚合器实例
+// Metrics exposes the metrics aggregator for external collection.
+// returns: the aggregator instance.
 func (s *Server) Metrics() *observer.Metrics {
 	return s.metrics
 }
 
-// trackWS 登记 WS 连接
+// trackWS registers a WS connection.
 func (s *Server) trackWS(ws *wsConn) {
 	s.wsMu.Lock()
 	s.wsCons[ws] = struct{}{}
 	s.wsMu.Unlock()
 }
 
-// untrackWS 注销 WS 连接
+// untrackWS unregisters a WS connection.
 func (s *Server) untrackWS(ws *wsConn) {
 	s.wsMu.Lock()
 	delete(s.wsCons, ws)
 	s.wsMu.Unlock()
 }
 
-// CloseWebSockets 关闭全部在途 WS 连接
+// CloseWebSockets closes all in-flight WS connections.
 //
-// 劫持后的连接不随 http.Server.Shutdown 结束，进程退出前需显式关闭
+// Hijacked connections do not end with http.Server.Shutdown; they must
+// be closed explicitly before process exit.
 func (s *Server) CloseWebSockets() {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
@@ -145,9 +181,9 @@ func (s *Server) CloseWebSockets() {
 	s.wsCons = make(map[*wsConn]struct{})
 }
 
-// llmFor 取缓存的 LLM 实例，无则装配
-// providerID: 提供商标识
-// returns: 包装了中间件链的 LLM
+// llmFor returns the cached LLM instance, assembling one if absent.
+// providerID: the provider identifier.
+// returns: the LLM wrapped with the middleware chain.
 func (s *Server) llmFor(providerID string) (core.LLM, error) {
 	s.mu.RLock()
 	llm, ok := s.llms[providerID]
@@ -156,13 +192,15 @@ func (s *Server) llmFor(providerID string) (core.LLM, error) {
 		return llm, nil
 	}
 
-	// TODO: Retry 参数与预算应可按提供商覆盖
+	// TODO: Retry parameters and budget should be overridable per provider
 	bare, err := s.newLLM(providerID)
 	if err != nil {
 		return nil, err
 	}
-	// 日志挂 LLM 级中间件：服务端主路径（Agent 循环）恒为流式，
-	// 只挂 ChatMiddleware 的日志对流式调用完全不生效
+	// Logging is attached as an LLM-level middleware: the server's
+	// main path (the Agent loop) is always streaming, and logging
+	// attached only via ChatMiddleware would have no effect on
+	// streaming calls at all.
 	pipeline := core.NewPipeline(bare, core.Retry(3))
 	wrapped := core.StreamRetry(
 		core.LoggingLLM(nil)(pipeline), 3,
@@ -173,8 +211,8 @@ func (s *Server) llmFor(providerID string) (core.LLM, error) {
 	return wrapped, nil
 }
 
-// resolveModel 确定本次请求使用的提供商与模型
-// returns: 提供商配置与模型 ID
+// resolveModel determines the provider and model to use for this request.
+// returns: the provider config and model ID.
 func (s *Server) resolveModel(providerID, model string) (*provider.ProviderConfig, string, error) {
 	if providerID == "" {
 		providerID = s.cfg.DefaultProvider
@@ -195,13 +233,32 @@ func (s *Server) resolveModel(providerID, model string) (*provider.ProviderConfi
 	return cfg, model, nil
 }
 
-// loop 构建 Agent 循环
-// returns: 装配好的循环
+// loop builds the Agent loop.
+// returns: the assembled loop.
 func (s *Server) loop(llm core.LLM, model string, systemPrompt string, onEvent func(agent.LoopEvent)) *agent.Loop {
 	if systemPrompt == "" {
 		systemPrompt = s.cfg.SystemPrompt
 	}
 	return agent.NewLoop(llm, s.tools, s.mem, agent.Config{
+		Model:         model,
+		SystemPrompt:  systemPrompt,
+		MaxIterations: s.cfg.MaxIterations,
+		TokenBudget:   s.cfg.TokenBudget,
+		OnEvent:       onEvent,
+	})
+}
+
+// statelessLoop builds a stateless Agent loop.
+//
+// No session memory is attached; paired with RunWithHistory: the
+// caller brings the full history and the server keeps no session
+// state at all.
+// returns: the assembled loop.
+func (s *Server) statelessLoop(llm core.LLM, model string, systemPrompt string, onEvent func(agent.LoopEvent)) *agent.Loop {
+	if systemPrompt == "" {
+		systemPrompt = s.cfg.SystemPrompt
+	}
+	return agent.NewLoop(llm, s.tools, nil, agent.Config{
 		Model:         model,
 		SystemPrompt:  systemPrompt,
 		MaxIterations: s.cfg.MaxIterations,

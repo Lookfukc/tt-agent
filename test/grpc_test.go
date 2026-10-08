@@ -15,8 +15,8 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/entry"
 )
 
-// newGRPCPair 启动 bufconn 上的 gRPC 服务并返回客户端连接
-// returns: 已就绪的 gRPC 客户端与清理函数
+// newGRPCPair starts a gRPC server on bufconn and returns a client connection.
+// returns: a ready gRPC client and a cleanup function.
 func newGRPCPair(t *testing.T, llm core.LLM) *grpc.ClientConn {
 	t.Helper()
 	srv := newTestServer(t, llm)
@@ -40,8 +40,8 @@ func newGRPCPair(t *testing.T, llm core.LLM) *grpc.ClientConn {
 	return conn
 }
 
-// grpcChatRequest 构造动态请求
-// returns: 填充好的请求消息
+// grpcChatRequest builds a dynamic request.
+// returns: the populated request message.
 func grpcChatRequest(t *testing.T, input string) *dynamicpb.Message {
 	t.Helper()
 	msg := dynamicpb.NewMessage(entry.GRPCChatRequestDesc())
@@ -51,7 +51,7 @@ func grpcChatRequest(t *testing.T, input string) *dynamicpb.Message {
 	return msg
 }
 
-// setField 写字符串字段
+// setField writes a string field.
 func setField(t *testing.T, msg *dynamicpb.Message, name, value string) {
 	t.Helper()
 	f := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
@@ -61,8 +61,8 @@ func setField(t *testing.T, msg *dynamicpb.Message, name, value string) {
 	msg.Set(f, protoreflect.ValueOfString(value))
 }
 
-// readField 读字符串字段
-// returns: 字段值
+// readField reads a string field.
+// returns: the field value.
 func readField(msg *dynamicpb.Message, name string) string {
 	f := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
 	if !msg.Has(f) {
@@ -132,7 +132,7 @@ func TestGRPCValidationError(t *testing.T) {
 	conn := newGRPCPair(t, &streamMockLLM{})
 	resp := dynamicpb.NewMessage(entry.GRPCChatResponseDesc())
 
-	// 空 input 服务层返回 error 事件而非 RPC 错误
+	// With empty input, the service layer returns an error event rather than an RPC error.
 	err := conn.Invoke(t.Context(), "/agentframework.AgentService/Chat",
 		grpcChatRequest(t, ""), resp)
 	if err != nil {

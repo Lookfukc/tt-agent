@@ -1,4 +1,4 @@
-// Package tools 提供工具注册与查找能力
+// Package tools provides tool registration and lookup.
 package tools
 
 import (
@@ -9,27 +9,27 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// Registry 工具注册表，并发安全
+// Registry is a concurrency-safe tool registry.
 type Registry struct {
 	mu    sync.RWMutex
 	tools map[string]core.Tool
 }
 
-// NewRegistry 构造空注册表
-// returns: 可用的注册表实例
+// NewRegistry constructs an empty registry.
+// returns: a usable registry instance
 func NewRegistry() *Registry {
 	return &Registry{tools: make(map[string]core.Tool)}
 }
 
-// Register 注册工具，重名覆盖
+// Register registers a tool; duplicate names overwrite.
 func (r *Registry) Register(t core.Tool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
 }
 
-// Get 按名查找工具
-// returns: 工具实例；ok 为 false 表示未注册
+// Get looks up a tool by name.
+// returns: the tool instance; ok is false if not registered
 func (r *Registry) Get(name string) (core.Tool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -37,8 +37,8 @@ func (r *Registry) Get(name string) (core.Tool, bool) {
 	return t, ok
 }
 
-// Specs 输出全部工具的定义，用于组装 ChatRequest
-// returns: 工具定义列表，按名稳定排序
+// Specs outputs the definitions of all tools, for assembling ChatRequest.
+// returns: a list of tool definitions, stably sorted by name
 func (r *Registry) Specs() []core.ToolSpec {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -48,14 +48,17 @@ func (r *Registry) Specs() []core.ToolSpec {
 			Name: t.Name(), Description: t.Description(), Parameters: t.Parameters(),
 		})
 	}
-	// map 迭代序随机：不排序则每次请求的工具定义顺序都不同，
-	// 提供商侧按前缀缓存 prompt 的机制全部失效
+	// Map iteration order is random: without sorting, the tool definition
+	// order would differ on every request, defeating providers' prefix-based
+	// prompt caching mechanisms entirely
 	sort.Slice(specs, func(i, j int) bool { return specs[i].Name < specs[j].Name })
 	return specs
 }
 
-// MustGet 按名查找工具，未注册时返回错误而非 panic，避免模型幻觉工具名打断整个循环
-// returns: 工具实例
+// MustGet looks up a tool by name, returning an error instead of panicking
+// when unregistered, so that a hallucinated tool name from the model does
+// not abort the whole loop.
+// returns: the tool instance
 func (r *Registry) MustGet(name string) (core.Tool, error) {
 	t, ok := r.Get(name)
 	if !ok {

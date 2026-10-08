@@ -8,15 +8,15 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// streamCallLLM 统计 ChatStream 被调次数
+// streamCallLLM counts how many times ChatStream was invoked
 type streamCallLLM struct{ calls int }
 
-// Chat 未使用
+// Chat is unused
 func (s *streamCallLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 返回即时结束的空流
+// ChatStream returns an immediately-ending empty stream
 func (s *streamCallLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	s.calls++
 	events := make(chan core.StreamEvent, 2)
@@ -26,7 +26,7 @@ func (s *streamCallLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-cha
 	return events, nil
 }
 
-// TestH9RateLimitLLMCoversStream RateLimitLLM 必须作用于流式路径
+// TestH9RateLimitLLMCoversStream verifies RateLimitLLM must apply to the streaming path
 func TestH9RateLimitLLMCoversStream(t *testing.T) {
 	inner := &streamCallLLM{}
 	limited := core.RateLimitLLM(1, 10*time.Second)(inner)
@@ -44,15 +44,15 @@ func TestH9RateLimitLLMCoversStream(t *testing.T) {
 	}
 }
 
-// usageFirstLLM 先发 Usage 再发文本（Anthropic/Gemini 行为）
+// usageFirstLLM emits Usage before text (Anthropic/Gemini behavior)
 type usageFirstLLM struct{ calls int }
 
-// Chat 未使用
+// Chat is unused
 func (u *usageFirstLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 首事件为 Usage，随后失败
+// ChatStream emits Usage as the first event, then fails
 func (u *usageFirstLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	u.calls++
 	events := make(chan core.StreamEvent, 3)
@@ -66,8 +66,8 @@ func (u *usageFirstLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-cha
 	return events, nil
 }
 
-// TestM_C1UsageNotContentThreshold 用量事件不得视为"已产出内容"，
-// 否则 Anthropic/Gemini 的首 token 前重试永远不触发
+// TestM_C1UsageNotContentThreshold: usage events must not count as "content produced",
+// otherwise the pre-first-token retry for Anthropic/Gemini never triggers
 func TestM_C1UsageNotContentThreshold(t *testing.T) {
 	flaky := &usageFirstLLM{}
 	wrapped := core.StreamRetry(flaky, 2)
@@ -84,7 +84,7 @@ func TestM_C1UsageNotContentThreshold(t *testing.T) {
 	}
 }
 
-// TestH10CacheKeyDifferentiatesToolArgs 不同的 assistant 工具调用历史不得同键命中
+// TestH10CacheKeyDifferentiatesToolArgs verifies different assistant tool-call histories must not hit the same cache key
 func TestH10CacheKeyDifferentiatesToolArgs(t *testing.T) {
 	calls := 0
 	inner := core.ChatHandler(func(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
@@ -104,7 +104,7 @@ func TestH10CacheKeyDifferentiatesToolArgs(t *testing.T) {
 	if _, err := wrapped(context.Background(), base); err != nil {
 		t.Fatal(err)
 	}
-	// 只换工具参数城市
+	// Vary only the tool argument (the city)
 	other := base
 	other.Messages = []core.Message{
 		{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{
@@ -119,7 +119,7 @@ func TestH10CacheKeyDifferentiatesToolArgs(t *testing.T) {
 	}
 }
 
-// TestH10CacheKeyDifferentiatesImages 不同图片的多模态请求不得同键命中
+// TestH10CacheKeyDifferentiatesImages verifies multimodal requests with different images must not hit the same cache key
 func TestH10CacheKeyDifferentiatesImages(t *testing.T) {
 	calls := 0
 	inner := core.ChatHandler(func(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
@@ -141,7 +141,7 @@ func TestH10CacheKeyDifferentiatesImages(t *testing.T) {
 	}
 }
 
-// TestH10CacheHitReturnsCopy 命中返回深拷贝，写回不得污染缓存
+// TestH10CacheHitReturnsCopy verifies a hit returns a deep copy; writing it back must not pollute the cache
 func TestH10CacheHitReturnsCopy(t *testing.T) {
 	inner := core.ChatHandler(func(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 		return &core.ChatResponse{
@@ -162,7 +162,7 @@ func TestH10CacheHitReturnsCopy(t *testing.T) {
 	}
 }
 
-// TestM_C2RetryZeroClamped Retry(0) 不得 panic，至少执行一次
+// TestM_C2RetryZeroClamped verifies Retry(0) must not panic and executes at least once
 func TestM_C2RetryZeroClamped(t *testing.T) {
 	calls := 0
 	inner := core.ChatHandler(func(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
@@ -178,7 +178,7 @@ func TestM_C2RetryZeroClamped(t *testing.T) {
 	}
 }
 
-// TestM_C3RateLimitNonPositive RateLimit(0) 不再除零 panic，透传执行
+// TestM_C3RateLimitNonPositive verifies RateLimit(0) no longer panics on divide-by-zero and passes through
 func TestM_C3RateLimitNonPositive(t *testing.T) {
 	inner := core.ChatHandler(func(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 		return &core.ChatResponse{Content: "ok"}, nil

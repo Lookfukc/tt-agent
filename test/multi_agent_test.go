@@ -6,22 +6,22 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/orchestrator"
 )
 
-// scriptedTurnsLLM 按调用次数返回预设内容
+// scriptedTurnsLLM returns scripted content based on the call count.
 type scriptedTurnsLLM struct {
 	turns []string
 	calls int
 }
 
-// Chat 未使用
+// Chat is unused.
 func (s *scriptedTurnsLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 返回本轮预设文本
+// ChatStream returns this turn's scripted text.
 func (s *scriptedTurnsLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	text := s.turns[min(s.calls, len(s.turns)-1)]
 	s.calls++
@@ -38,7 +38,7 @@ func (s *scriptedTurnsLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-
 func TestRouterStep(t *testing.T) {
 	o := orchestrator.New(nil)
 	mk := func(turns ...string) *agent.Loop {
-		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	}
 	o.RegisterAgent("classifier", mk("reviewer"))
 	o.RegisterAgent("writer", mk("写作结果"))
@@ -72,7 +72,7 @@ func TestRouterStep(t *testing.T) {
 func TestRouterStepInvalidChoice(t *testing.T) {
 	o := orchestrator.New(nil)
 	mk := func(turns ...string) *agent.Loop {
-		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	}
 	o.RegisterAgent("classifier", mk("不存在的agent"))
 	o.RegisterAgent("writer", mk("x"))
@@ -96,9 +96,9 @@ func TestRouterStepInvalidChoice(t *testing.T) {
 func TestSupervisorStep(t *testing.T) {
 	o := orchestrator.New(nil)
 	mk := func(turns ...string) *agent.Loop {
-		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	}
-	// 监督者：先委派 writer，再委派 reviewer，最后收敛
+	// Supervisor: first delegate to writer, then reviewer, finally converge.
 	o.RegisterAgent("boss", mk(
 		"WORKER writer\n写初稿",
 		"WORKER reviewer\n审核初稿",
@@ -132,9 +132,9 @@ func TestSupervisorStep(t *testing.T) {
 func TestSupervisorRoundsExhausted(t *testing.T) {
 	o := orchestrator.New(nil)
 	mk := func(turns ...string) *agent.Loop {
-		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		return agent.NewLoop(&scriptedTurnsLLM{turns: turns}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	}
-	// 永远委派，不收敛
+	// Delegates forever, never converges.
 	o.RegisterAgent("boss", mk("WORKER writer\n继续"))
 	o.RegisterAgent("writer", mk("干"))
 	_ = o.RegisterWorkflow(&orchestrator.Workflow{

@@ -8,115 +8,162 @@ import (
 	"unicode/utf8"
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/internal/sessionlog"
 )
 
-// Splitter 一次调用拿到预算内外的消息
+// Splitter provides both in-budget and out-of-budget messages in one
+// call.
 //
-// Summary 需要被截断消息的内容来压缩，旧路径只能以超大预算
-// 全量取回再本地切分；实现方支持本接口可免掉这次全量物化
+// Summary needs the content of truncated messages to compress them;
+// the old path had to fetch everything with a huge budget and split
+// locally. Implementations supporting this interface avoid that full
+// materialization.
 type Splitter interface {
-	// Split 取回不超预算的最近消息与被截断丢弃的旧消息
+	// Split returns the most recent messages within budget and the
+	// older messages dropped by truncation.
 	Split(ctx context.Context, sessionID string, budget int64) (kept, dropped []core.Message, err error)
 }
 
-// Trimmer 物理丢弃最旧的 n 条非系统消息
+// Trimmer physically discards the oldest n non-system messages.
 //
-// n 按非系统消息计数且绝不删除系统消息，与 Splitter 丢弃侧语义
-// 严格对齐：Split 丢弃的恰是最旧的若干条非系统消息（按原子组整组），
-// 先 Split 后 Trim 不会切破 assistant(tool_calls)+tool 配对
+// n counts non-system messages and never deletes system messages,
+// strictly aligned with the drop-side semantics of Splitter: what
+// Split drops is exactly a prefix of the oldest non-system messages
+// (as whole atomic groups), so a Split followed by Trim can never
+// break an assistant(tool_calls)+tool pairing.
 type Trimmer interface {
-	// Trim 丢弃最旧的 n 条非系统消息
+	// Trim discards the oldest n non-system messages.
 	Trim(ctx context.Context, sessionID string, n int) error
 }
 
-// summaryCacheEntry 会话级摘要缓存
+// SummaryStore is the summary persistence capability.
+//
+// The Summary decorator hands the summary text and the folded-in
+// message count to the inner persistence layer, and restores the
+// cache from it after a process restart. For compact mode
+// (NewCompactingSummary) this is a correctness requirement: the old
+// messages have been physically deleted, so the summary text is the
+// only copy of that stretch of context. Inner layers that do not
+// implement this interface degrade to a pure in-memory cache (lost on
+// restart).
+type SummaryStore interface {
+	// SaveSummary persists the session summary.
+	// covered: number of messages folded into the summary.
+	// text: the summary text.
+	SaveSummary(ctx context.Context, sessionID string, covered int, text string) error
+	// LoadSummary reads back the session summary.
+	// returns: the summary text and folded-in count; ("", 0, nil) when absent.
+	LoadSummary(ctx context.Context, sessionID string) (text string, covered int, err error)
+}
+
+// summaryCacheEntry is the per-session summary cache.
 type summaryCacheEntry struct {
-	// dropped 已折入摘要的消息条数；压缩态（已物理 Trim）恒为 0，
-	// 非压缩态等于当前截断点。命中/回退/前进都由它与实际
-	// dropped 条数的比较驱动
+	// dropped is the number of messages folded into the summary; in
+	// compact mode (already physically Trimmed) it is always 0, in
+	// non-compact mode it equals the current truncation point. Hits,
+	// fallbacks, and advances are all driven by comparing it against
+	// the actual dropped message count.
 	dropped int
-	// text 压缩产物
+	// text is the compression output.
 	text string
 }
 
-// Summary 摘要压缩记忆
+// Summary is a summarizing memory.
 //
-// 包装内层 Memory：预算截断会丢弃的旧消息不再直接扔掉，
-// 而是用 LLM 压缩成一段摘要作为上下文前缀。摘要由"已折入条数"
-// 驱动缓存：同一截断点重复询问不重复压缩，截断点前进只压缩
-// 增量并与旧摘要滚动合并
+// It wraps an inner Memory: old messages that budget truncation would
+// discard are no longer thrown away directly; instead they are
+// compressed by an LLM into a summary serving as the context prefix.
+// The summary cache is driven by the "folded-in count": repeated
+// queries at the same truncation point do not re-compress, and when
+// the truncation point advances only the increment is compressed and
+// rollingly merged into the old summary.
 type Summary struct {
 	inner   core.Memory
 	llm     core.LLM
 	counter core.TokenCounter
-	// compact 压缩态：摘要成功后对支持 Trimmer 的内层物理删除
-	// 已折入的消息，长会话的内存与磁盘占用有界
+	// compact is the compaction mode: after a summary succeeds, the
+	// folded-in messages are physically deleted from inner layers that
+	// support Trimmer, keeping memory and disk usage of long sessions
+	// bounded.
 	compact bool
-	// injected 是否注入了自定义估算器：注入口径必须由本层执行
-	// 预算装填（Split 快路径用的是内层口径，会绕过注入）
+	// injected reports whether a custom estimator was injected: when
+	// injected, budget packing must be executed by this layer (the
+	// Split fast path uses the inner layer's measure and would bypass
+	// the injection).
 	injected bool
 	mu       sync.Mutex
 	cache    map[string]*summaryCacheEntry
 	locks    map[string]*sync.Mutex
 }
 
-// NewSummary 构造摘要记忆
+// NewSummary constructs a summarizing memory.
 //
-// 预算估算默认沿用内置粗估而非内层 Memory 的精确计数器：
-// core.Memory 接口不暴露计数器，摘要层拿不到内层实例的口径；
-// 粗估偏保守（宁少勿超），截断点只会更早不会超窗。
-// 内层消息不删除，完整保留（审计友好，占用无界——需要有界的
-// 用 NewCompactingSummary）
-// inner: 实际存储，Buffer 或 Persistent
-// llm: 用于压缩的模型，建议用廉价小模型
-// returns: 可用的记忆实例
+// Budget estimation defaults to the built-in rough estimate rather
+// than the inner Memory's precise counter: the core.Memory interface
+// does not expose the counter, so the summary layer cannot access the
+// inner instance's measure; the rough estimate errs conservative
+// (better under than over), so the truncation point only arrives
+// earlier, never exceeds the window. Inner messages are not deleted
+// and are kept in full (audit-friendly, unbounded usage — use
+// NewCompactingSummary when bounded).
+// inner: the actual storage, e.g. Persistent.
+// llm: the model used for compression; a cheap small model is recommended.
+// returns: a usable memory instance.
 func NewSummary(inner core.Memory, llm core.LLM) *Summary {
 	return newSummary(inner, llm, nil, false)
 }
 
-// NewSummaryWithCounter 构造注入 token 估算器的摘要记忆
+// NewSummaryWithCounter constructs a summarizing memory with an
+// injected token estimator.
 //
-// 内外层估算口径必须一致时使用（如内层 Persistent 配了精确
-// 分词计数器），预算装填才会与内层截断对齐
-// inner: 实际存储，Buffer 或 Persistent
-// llm: 用于压缩的模型，建议用廉价小模型
-// c: token 估算器，nil 退化为内置粗估
-// returns: 可用的记忆实例
+// Use this when the inner and outer estimation measures must agree
+// (e.g. the inner Persistent is configured with an exact tokenizer
+// counter), so that budget packing aligns with the inner truncation.
+// inner: the actual storage, e.g. Persistent.
+// llm: the model used for compression; a cheap small model is recommended.
+// c: token estimator; nil degrades to the built-in rough estimate.
+// returns: a usable memory instance.
 func NewSummaryWithCounter(inner core.Memory, llm core.LLM, c core.TokenCounter) *Summary {
 	return newSummary(inner, llm, c, false)
 }
 
-// NewCompactingSummary 构造物理压缩态的摘要记忆
+// NewCompactingSummary constructs a summarizing memory in physically
+// compacting mode.
 //
-// 与 NewSummary 的差异：被摘要吞掉的旧消息随后从内层物理删除
-// （内层需实现 Trimmer——Buffer/Persistent 均实现，TTL 装饰
-// 不影响寻址），长会话的存储占用随摘要滚动收敛。
-// 摘要本身只在内存缓存里，重启后丢失——压缩态下旧消息已删，
-// 重启即真正失去这部分上下文，用 Persistent 内层时自行权衡
-// inner: 实际存储
-// llm: 用于压缩的模型，建议用廉价小模型
-// returns: 可用的记忆实例
+// Differs from NewSummary: old messages swallowed by the summary are
+// subsequently physically deleted from the inner layer (the inner
+// layer must implement Trimmer — Persistent does; TTL decoration does
+// not affect addressing), so long-session storage usage converges as
+// the summary rolls forward. The summary is persisted per session via
+// the inner layer's SummaryStore capability (Persistent implements
+// it) and automatically restored after restart without re-compressing;
+// if the inner layer does not support SummaryStore the summary lives
+// only in memory, and that stretch of context is lost on restart.
+// inner: the actual storage.
+// llm: the model used for compression; a cheap small model is recommended.
+// returns: a usable memory instance.
 func NewCompactingSummary(inner core.Memory, llm core.LLM) *Summary {
 	return newSummary(inner, llm, nil, true)
 }
 
-// NewCompactingSummaryWithCounter 注入估算器的物理压缩态摘要记忆
-// inner: 实际存储
-// llm: 用于压缩的模型
-// c: token 估算器，nil 退化为内置粗估
-// returns: 可用的记忆实例
+// NewCompactingSummaryWithCounter constructs a physically compacting
+// summarizing memory with an injected estimator.
+// inner: the actual storage.
+// llm: the model used for compression.
+// c: token estimator; nil degrades to the built-in rough estimate.
+// returns: a usable memory instance.
 func NewCompactingSummaryWithCounter(inner core.Memory, llm core.LLM, c core.TokenCounter) *Summary {
 	return newSummary(inner, llm, c, true)
 }
 
-// newSummary 共用构造
-// c: token 估算器，nil 退化为内置粗估
-// compact: 是否物理压缩
-// returns: 就绪实例
+// newSummary is the shared constructor.
+// c: token estimator; nil degrades to the built-in rough estimate.
+// compact: whether to physically compact.
+// returns: a ready instance.
 func newSummary(inner core.Memory, llm core.LLM, c core.TokenCounter, compact bool) *Summary {
 	injected := c != nil
 	if c == nil {
-		c = roughCounter{}
+		c = sessionlog.Rough{}
 	}
 	return &Summary{
 		inner:    inner,
@@ -129,12 +176,12 @@ func newSummary(inner core.Memory, llm core.LLM, c core.TokenCounter, compact bo
 	}
 }
 
-// Add 透传内层存储
+// Add passes through to the inner storage.
 func (s *Summary) Add(ctx context.Context, sessionID string, msgs ...core.Message) error {
 	return s.inner.Add(ctx, sessionID, msgs...)
 }
 
-// Clear 清空会话并作废摘要缓存
+// Clear empties the session and invalidates the summary cache.
 func (s *Summary) Clear(ctx context.Context, sessionID string) error {
 	unlock := s.lockSession(sessionID)
 	defer unlock()
@@ -145,11 +192,13 @@ func (s *Summary) Clear(ctx context.Context, sessionID string) error {
 	return s.inner.Clear(ctx, sessionID)
 }
 
-// Recent 取回预算内消息，超出部分以摘要替代
+// Recent returns in-budget messages, replacing the excess with a
+// summary.
 func (s *Summary) Recent(ctx context.Context, sessionID string, budget int64) ([]core.Message, error) {
-	// 整个"拆分 → 压缩 → Trim"按会话串行：并发 Recent 各自 Split
-	// 到相同 dropped 后各自 Trim，第二次 Trim 删的就是尚未摘要的
-	// 消息——数据丢失，不是浪费那么简单
+	// The whole "split → compress → Trim" is serialized per session:
+	// concurrent Recents would each Split to the same dropped count
+	// then each Trim, and the second Trim would delete messages not
+	// yet summarized — that is data loss, not mere waste.
 	unlock := s.lockSession(sessionID)
 	defer unlock()
 
@@ -162,7 +211,8 @@ func (s *Summary) Recent(ctx context.Context, sessionID string, budget int64) ([
 	if text == "" {
 		return kept, nil
 	}
-	// 摘要插在系统消息之后、保留历史之前
+	// The summary is inserted after system messages and before the
+	// retained history.
 	out := make([]core.Message, 0, len(kept)+1)
 	inserted := false
 	for _, m := range kept {
@@ -181,13 +231,16 @@ func (s *Summary) Recent(ctx context.Context, sessionID string, budget int64) ([
 	return out, nil
 }
 
-// splitInner 取预算内外的消息，优先走内层的 Split 快路径
+// splitInner fetches in-budget and out-of-budget messages, preferring
+// the inner layer's Split fast path.
 //
-// 注入了自定义估算器时不用快路径——Split 按内层口径装填预算，
-// 注入口径会被绕过（L-M1 语义）。解装饰链寻址 Split 实现时途经
-// TTL 必须触碰：Split 旁路了 TTL.Recent，不触碰的话活跃会话
-// 会被 janitor 误判空闲而逐出
-// returns: 保留消息、被截断消息
+// When a custom estimator has been injected the fast path is not used
+// — Split packs the budget by the inner layer's measure, bypassing
+// the injected one (L-M1 semantics). When unwrapping the decoration
+// chain to address a Split implementation, passing through TTL must
+// touch it: Split bypasses TTL.Recent, and without the touch the
+// janitor would misjudge an active session as idle and evict it.
+// returns: kept messages, dropped messages.
 func (s *Summary) splitInner(ctx context.Context, sessionID string, budget int64) ([]core.Message, []core.Message, error) {
 	if !s.injected {
 		m := s.unwrapTouched(sessionID)
@@ -195,33 +248,53 @@ func (s *Summary) splitInner(ctx context.Context, sessionID string, budget int64
 			return sp.Split(ctx, sessionID, budget)
 		}
 	}
-	// 内层不支持 Split：全量取回本地切分。
-	// 走 s.inner 而非解包结果，保持 TTL 触碰等装饰语义
+	// Inner layer does not support Split: fetch everything and split
+	// locally. Goes through s.inner rather than the unwrapped result
+	// to preserve decoration semantics such as the TTL touch.
 	all, err := s.inner.Recent(ctx, sessionID, 1<<62)
 	if err != nil {
 		return nil, nil, err
 	}
-	var log sessionLog
-	log.add(s.counter, time.Now(), all...)
-	kept, dropped := log.split(budget)
+	var log sessionlog.Log
+	log.Add(s.counter, time.Now(), all...)
+	kept, dropped := log.Split(budget)
 	return kept, dropped, nil
 }
 
-// resolveSummary 计算当前截断点对应的摘要文本
+// resolveSummary computes the summary text for the current truncation
+// point.
 //
-// 命中或预算回退（缓存已折入条数 >= 当前 dropped 条数）直接复用
-// 旧摘要——回退场景旧摘要覆盖范围是超集，不丢信息；前进时只
-// 压缩增量并与旧摘要滚动合并。压缩态在压缩成功后立即 Trim，
-// 失败则退化为纯截断且不写缓存，下轮重试
-// returns: 摘要文本，无需摘要或压缩失败时为空串
+// On a hit or budget fallback (cached folded-in count >= current
+// dropped count) the old summary is reused directly — in the fallback
+// case the old summary's coverage is a superset, so no information is
+// lost; on an advance only the increment is compressed and rollingly
+// merged into the old summary. In compact mode Trim happens
+// immediately after a successful compression; on failure it degrades
+// to pure truncation without writing the cache, retrying next round.
+// On an in-memory cache miss it first tries restoring from the inner
+// SummaryStore (after a process restart the summary is not lost and
+// is not re-compressed); after a successful compression it is written
+// through to the inner layer.
+// returns: the summary text; empty string when no summary is needed
+// or compression failed.
 func (s *Summary) resolveSummary(ctx context.Context, sessionID string, dropped []core.Message) string {
 	s.mu.Lock()
 	entry, ok := s.cache[sessionID]
 	s.mu.Unlock()
+	if !ok {
+		if st, supports := unwrapMemory(s.inner).(SummaryStore); supports {
+			if text, covered, err := st.LoadSummary(ctx, sessionID); err == nil && text != "" {
+				entry = &summaryCacheEntry{dropped: covered, text: text}
+				s.mu.Lock()
+				s.cache[sessionID] = entry
+				s.mu.Unlock()
+			}
+		}
+	}
 
 	var prior string
 	covered := 0
-	if ok {
+	if ok || entry != nil {
 		prior, covered = entry.text, entry.dropped
 	}
 	if covered >= len(dropped) {
@@ -237,19 +310,28 @@ func (s *Summary) resolveSummary(ctx context.Context, sessionID string, dropped 
 	if s.compact {
 		if tr, ok := unwrapMemory(s.inner).(Trimmer); ok {
 			if err := tr.Trim(ctx, sessionID, len(dropped)); err == nil {
-				// 已物理删除，下轮 dropped 从 0 重新计
+				// Physically deleted; next round dropped restarts from 0.
 				cacheDropped = 0
 			}
-			// Trim 失败：消息仍在内层，缓存记当前截断点，下轮命中不重压
+			// Trim failed: messages are still in the inner layer; the
+			// cache records the current truncation point so the next
+			// round hits without re-compressing.
 		}
 	}
 	s.mu.Lock()
 	s.cache[sessionID] = &summaryCacheEntry{dropped: cacheDropped, text: text}
 	s.mu.Unlock()
+	// Write through to inner persistence; failure does not affect
+	// correctness in this process (the in-memory cache is in place) —
+	// after restart it degrades to re-compression, losing no messages
+	// (in non-compact mode messages are still in the inner layer).
+	if st, supports := unwrapMemory(s.inner).(SummaryStore); supports {
+		_ = st.SaveSummary(ctx, sessionID, cacheDropped, text)
+	}
 	return text
 }
 
-// unwrapMemory 解开装饰链取最内层存储
+// unwrapMemory unwraps the decoration chain to the innermost storage.
 func unwrapMemory(m core.Memory) core.Memory {
 	for {
 		u, ok := m.(interface{ Unwrap() core.Memory })
@@ -260,9 +342,10 @@ func unwrapMemory(m core.Memory) core.Memory {
 	}
 }
 
-// unwrapTouched 解开装饰链取最内层存储，途经的装饰层（如 TTL）
-// 先触碰活跃时间
-// returns: 最内层存储
+// unwrapTouched unwraps the decoration chain to the innermost storage,
+// first touching the activity time of each decoration layer it passes
+// through (e.g. TTL).
+// returns: the innermost storage.
 func (s *Summary) unwrapTouched(sessionID string) core.Memory {
 	m := s.inner
 	for {
@@ -277,13 +360,15 @@ func (s *Summary) unwrapTouched(sessionID string) core.Memory {
 	}
 }
 
-// lockSession 按会话加互斥锁
+// lockSession takes a per-session mutex.
 //
-// 全局锁会把 LLM 压缩的秒级延迟扩散到所有会话，按会话粒度
-// 串行既保证 Trim 安全又不跨会话干扰；锁对象随 Clear 移除，
-// 移除瞬间在途的持有者与新建锁可能短暂并行，Clear 语义上
-// 本就终止会话，可接受
-// returns: 解锁函数
+// A global lock would spread the LLM compression's seconds of latency
+// across all sessions; per-session serialization keeps Trim safe
+// without cross-session interference. The lock object is removed with
+// Clear; at the instant of removal an in-flight holder and a newly
+// created lock may briefly run in parallel — Clear semantically
+// terminates the session anyway, which is acceptable.
+// returns: the unlock function.
 func (s *Summary) lockSession(sessionID string) func() {
 	s.mu.Lock()
 	l, ok := s.locks[sessionID]
@@ -296,15 +381,18 @@ func (s *Summary) lockSession(sessionID string) func() {
 	return l.Unlock
 }
 
-// compress 调用 LLM 生成摘要，旧摘要非空时滚动合并
-// returns: 摘要文本，失败时空串
+// compress calls the LLM to produce a summary, rollingly merging when
+// the prior summary is non-empty.
+// returns: the summary text; empty string on failure.
 func (s *Summary) compress(ctx context.Context, prior string, msgs []core.Message) string {
-	// 单条消息截到 2KB，控制压缩请求本身的成本
+	// Each message is truncated to 2KB, controlling the cost of the
+	// compression request itself.
 	var body string
 	for i, m := range msgs {
 		content := m.Content
 		if len(content) > 2048 {
-			// 字节截断可能切碎 UTF-8 尾字符，回退到 rune 边界
+			// Byte truncation may split a trailing UTF-8 character;
+			// fall back to a rune boundary.
 			cut := 2048
 			for cut > 0 && !utf8.RuneStart(content[cut]) {
 				cut--

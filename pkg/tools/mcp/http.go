@@ -13,10 +13,11 @@ import (
 	"time"
 )
 
-// httpTransport Streamable HTTP 传输
+// httpTransport is the Streamable HTTP transport.
 //
-// 每个请求 POST 一次，响应可能是单 JSON 或 SSE 流；
-// initialize 响应携带的 Mcp-Session-Id 自动续用到后续请求
+// Each request is one POST; the response may be a single JSON document or
+// an SSE stream. The Mcp-Session-Id carried by the initialize response is
+// reused automatically on subsequent requests.
 type httpTransport struct {
 	url    string
 	apiKey string
@@ -26,10 +27,10 @@ type httpTransport struct {
 	sessionID string
 }
 
-// newHTTPTransport 构造 HTTP 传输
-// url: MCP 端点地址
-// apiKey: 可选的 Bearer 密钥
-// returns: 就绪的传输
+// newHTTPTransport constructs the HTTP transport.
+// url: the MCP endpoint address
+// apiKey: an optional Bearer key
+// returns: the ready transport
 func newHTTPTransport(url, apiKey string) *httpTransport {
 	return &httpTransport{
 		url:    url,
@@ -38,16 +39,16 @@ func newHTTPTransport(url, apiKey string) *httpTransport {
 	}
 }
 
-// ConnectHTTP 建立到 Streamable HTTP 服务器的客户端
-// name: 服务器名
-// url: MCP 端点地址
-// apiKey: 可选密钥，空则不携带
-// returns: 未握手的客户端，需再调用 Connect
+// ConnectHTTP builds a client for a Streamable HTTP server.
+// name: the server name
+// url: the MCP endpoint address
+// apiKey: an optional key; omitted when empty
+// returns: an un-handshaken client; Connect must still be called
 func ConnectHTTP(name, url, apiKey string) *Client {
 	return &Client{name: name, tr: newHTTPTransport(url, apiKey)}
 }
 
-// send POST 请求并解析响应
+// send POSTs the request and parses the response.
 func (t *httpTransport) send(ctx context.Context, req rpcRequest) (*rpcResponse, error) {
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -65,8 +66,10 @@ func (t *httpTransport) send(ctx context.Context, req rpcRequest) (*rpcResponse,
 
 	ct := resp.Header.Get("Content-Type")
 	mediaType, _, _ := mime.ParseMediaType(ct)
-	// 会话头挂在 HTTP 响应头上，两种编码格式都可能分配，
-	// 必须在分支之前捕获，否则 initialize 以 SSE 应答时丢会话
+	// The session header rides on HTTP response headers and either
+	// encoding format may allocate one; it must be captured before the
+	// branch, otherwise the session is lost when initialize answers via
+	// SSE
 	t.captureSession(resp)
 	switch {
 	case strings.Contains(mediaType, "text/event-stream"):
@@ -80,7 +83,7 @@ func (t *httpTransport) send(ctx context.Context, req rpcRequest) (*rpcResponse,
 	}
 }
 
-// notify POST 通知帧，响应体丢弃
+// notify POSTs a notification frame; the response body is discarded.
 func (t *httpTransport) notify(ctx context.Context, req rpcRequest) error {
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -95,16 +98,18 @@ func (t *httpTransport) notify(ctx context.Context, req rpcRequest) error {
 	return nil
 }
 
-// close HTTP 无长连接资源，会话由服务器侧过期
+// close: HTTP holds no long-lived resources; the session expires on the
+// server side.
 func (t *httpTransport) close() error { return nil }
 
-// post 发送一次 POST，带上会话头
+// post sends one POST, carrying the session header.
 func (t *httpTransport) post(ctx context.Context, payload []byte) (*http.Response, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, t.url, strings.NewReader(string(payload)))
 	if err != nil {
 		return nil, err
 	}
-	// 双 Accept 是协议要求：服务器二选一回复格式
+	// The dual Accept is a protocol requirement: the server picks one of
+	// the two reply formats
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "application/json, text/event-stream")
 	if t.apiKey != "" {
@@ -119,7 +124,7 @@ func (t *httpTransport) post(ctx context.Context, payload []byte) (*http.Respons
 	return t.client.Do(httpReq)
 }
 
-// captureSession 记录服务器分配的会话 ID
+// captureSession records the server-assigned session ID.
 func (t *httpTransport) captureSession(resp *http.Response) {
 	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
 		t.mu.Lock()
@@ -128,9 +133,10 @@ func (t *httpTransport) captureSession(resp *http.Response) {
 	}
 }
 
-// readSSE 解析 SSE 形式的响应，取到匹配 ID 的帧为止
+// readSSE parses an SSE-formed response, up to the frame with the
+// matching ID.
 //
-// 流里可能夹带服务器通知，按 ID 过滤
+// The stream may interleave server notifications; filter by ID.
 func (t *httpTransport) readSSE(ctx context.Context, body io.Reader, id int64) (*rpcResponse, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
@@ -151,7 +157,8 @@ func (t *httpTransport) readSSE(ctx context.Context, body io.Reader, id int64) (
 		if err := json.Unmarshal([]byte(data), &resp); err != nil {
 			continue
 		}
-		// method 非空是服务器主动请求，id 相同也不能当本请求响应
+		// A non-empty method marks a server-initiated request; even with
+		// the same id it must not be taken as this request's response
 		if resp.Method == "" && resp.ID == id {
 			return &resp, nil
 		}

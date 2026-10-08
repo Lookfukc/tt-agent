@@ -6,9 +6,10 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 )
 
-// assertNoOrphanTool 校验历史中每条 tool 消息前都有携带对应 tool_call 的父 assistant
+// assertNoOrphanTool verifies every tool message in the history has a preceding parent assistant carrying the corresponding tool_call
 func assertNoOrphanTool(t *testing.T, msgs []core.Message) {
 	t.Helper()
 	callerIDs := map[string]bool{}
@@ -24,8 +25,9 @@ func assertNoOrphanTool(t *testing.T, msgs []core.Message) {
 	}
 }
 
-// TestH5NoOrphanToolMessages 预算刚好装下 tool 结果但装不下父消息时，
-// 原逐条装填产出孤儿 tool 消息；原子组打包必须同进同退
+// TestH5NoOrphanToolMessages: when the budget just fits the tool results but not the
+// parent messages, the old per-message packing produced orphan tool messages;
+// atomic group packing must admit or drop them together
 func TestH5NoOrphanToolMessages(t *testing.T) {
 	ctx := context.Background()
 	msgs := []core.Message{
@@ -45,7 +47,7 @@ func TestH5NoOrphanToolMessages(t *testing.T) {
 	}
 
 	for _, budget := range []int64{4, 6, 8, 10, 12, 20, 100} {
-		buf := memory.NewBuffer(nil)
+		buf := memorytest.NewBuffer(nil)
 		if err := buf.Add(ctx, "s", msgs...); err != nil {
 			t.Fatalf("Add: %v", err)
 		}
@@ -57,10 +59,10 @@ func TestH5NoOrphanToolMessages(t *testing.T) {
 	}
 }
 
-// TestH5GroupNeverEmpty 极小预算下也必须保留至少一组完整历史
+// TestH5GroupNeverEmpty verifies that even with a tiny budget, at least one complete history group must be kept
 func TestH5GroupNeverEmpty(t *testing.T) {
 	ctx := context.Background()
-	buf := memory.NewBuffer(nil)
+	buf := memorytest.NewBuffer(nil)
 	_ = buf.Add(ctx, "s",
 		core.Message{Role: core.RoleAssistant, Content: "早", ToolCalls: []core.ToolCall{{ID: "x", Name: "n", Arguments: `{}`}}},
 		core.Message{Role: core.RoleTool, ToolCallID: "x", Content: "晚"},
@@ -75,10 +77,10 @@ func TestH5GroupNeverEmpty(t *testing.T) {
 	assertNoOrphanTool(t, got)
 }
 
-// TestH5SummaryDropsGroups 摘要记忆同样不得产出孤儿 tool 消息
+// TestH5SummaryDropsGroups verifies summary memory likewise must not produce orphan tool messages
 func TestH5SummaryDropsGroups(t *testing.T) {
 	ctx := context.Background()
-	inner := memory.NewBuffer(nil)
+	inner := memorytest.NewBuffer(nil)
 	mem := memory.NewSummary(inner, &summaryLLM{})
 	msgs := []core.Message{
 		{Role: core.RoleSystem, Content: "sys"},

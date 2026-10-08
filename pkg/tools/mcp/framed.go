@@ -9,9 +9,10 @@ import (
 	"sync"
 )
 
-// framedTransport 长连接按行分帧传输（stdio 等）
+// framedTransport is a long-lived, line-framed transport (stdio etc.).
 //
-// 请求写出后挂起等待读循环按 ID 派发响应
+// After a request is written out, the caller suspends until the read loop
+// dispatches the response by ID.
 type framedTransport struct {
 	rw io.ReadWriteCloser
 
@@ -22,16 +23,16 @@ type framedTransport struct {
 	done      chan struct{}
 }
 
-// newFramedTransport 构造分帧传输并启动读循环
-// rw: 双向分帧流
-// returns: 就绪的传输
+// newFramedTransport constructs the framed transport and starts the read loop.
+// rw: a bidirectional framed stream
+// returns: the ready transport
 func newFramedTransport(rw io.ReadWriteCloser) *framedTransport {
 	t := &framedTransport{rw: rw, done: make(chan struct{})}
 	go t.readLoop()
 	return t
 }
 
-// send 写出请求并等待对应响应
+// send writes the request out and waits for the matching response.
 func (t *framedTransport) send(ctx context.Context, req rpcRequest) (*rpcResponse, error) {
 	ch := make(chan *rpcResponse, 1)
 	t.pending.Store(req.ID, ch)
@@ -54,16 +55,17 @@ func (t *framedTransport) send(ctx context.Context, req rpcRequest) (*rpcRespons
 	}
 }
 
-// notify 写出通知帧
+// notify writes a notification frame out.
 func (t *framedTransport) notify(_ context.Context, req rpcRequest) error {
 	return t.writeFrame(req)
 }
 
-// close 关闭流并唤醒全部等待者
+// close closes the stream and wakes all waiters.
 //
-// 绝不能先抢 writeMu：对端停读导致 Write 阻塞在锁内时，
-// Close 会跟着卡死，Kill 也永远执行不到。直接关流即可，
-// 底层连接关闭（stdio 下含 Kill 进程）会解除阻塞的 Write
+// It must never grab writeMu first: if the peer stops reading and Write
+// blocks inside the lock, Close would block with it and Kill would never
+// run. Just close the stream directly — closing the underlying connection
+// (including killing the process under stdio) unblocks the stuck Write.
 func (t *framedTransport) close() error {
 	var err error
 	t.closeOnce.Do(func() {
@@ -73,38 +75,42 @@ func (t *framedTransport) close() error {
 	return err
 }
 
-// shutdownDone 关闭 done 通道，只关一次
+// shutdownDone closes the done channel, exactly once.
 func (t *framedTransport) shutdownDone() {
 	t.doneOnce.Do(func() { close(t.done) })
 }
 
-// readLoop 消费响应帧并按 ID 派发
+// readLoop consumes response frames and dispatches them by ID.
 func (t *framedTransport) readLoop() {
 	scanner := bufio.NewScanner(t.rw)
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for scanner.Scan() {
 		var resp rpcResponse
-		// method 非空是服务器主动请求（如 roots/list），id 可能
-		// 与在途请求撞号，误当响应会静默吞掉正确结果
+		// A non-empty method marks a server-initiated request (e.g.
+		// roots/list); its id may collide with an in-flight request, and
+		// mistaking it for the response would silently swallow the
+		// correct result
 		if json.Unmarshal(scanner.Bytes(), &resp) != nil || resp.ID == 0 || resp.Method != "" {
-			// 通知、服务器请求或坏帧，客户端侧不处理
+			// Notification, server request, or bad frame — not handled
+			// on the client side
 			continue
 		}
 		if ch, ok := t.pending.LoadAndDelete(resp.ID); ok {
 			ch.(chan *rpcResponse) <- &resp
 		}
 	}
-	// 读循环退出（含超长行 ErrTooLong）必须关 done，
-	// 否则之后的全部请求永久挂起且无任何报错
+	// When the read loop exits (including ErrTooLong on overlong lines),
+	// done must be closed; otherwise every subsequent request would hang
+	// forever with no error at all
 	t.shutdownDone()
-	// 传输关闭后叫醒所有等待者
+	// Wake all waiters after the transport is closed
 	t.pending.Range(func(_, v any) bool {
 		close(v.(chan *rpcResponse))
 		return true
 	})
 }
 
-// writeFrame 串行化写出一帧
+// writeFrame serializes the writing of one frame.
 func (t *framedTransport) writeFrame(req rpcRequest) error {
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()

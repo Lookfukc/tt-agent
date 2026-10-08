@@ -8,6 +8,7 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 )
 
 func TestPersistentSurvivesRestart(t *testing.T) {
@@ -26,7 +27,7 @@ func TestPersistentSurvivesRestart(t *testing.T) {
 	if err := p1.Add(ctx, "s1", msgs...); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	// 不关文件直接模拟崩溃，验证每条 Add 已落盘
+	// Simulate a crash without closing files, verifying each Add already hit the disk.
 
 	p2, err := memory.NewPersistent(dir, nil)
 	if err != nil {
@@ -40,7 +41,7 @@ func TestPersistentSurvivesRestart(t *testing.T) {
 		t.Errorf("restored = %+v", got)
 	}
 
-	// Clear 后再恢复应为空
+	// After Clear, reopening should find nothing.
 	if err := p2.Clear(ctx, "s1"); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
@@ -53,7 +54,7 @@ func TestPersistentSurvivesRestart(t *testing.T) {
 
 func TestPersistentSkipsCorruptLines(t *testing.T) {
 	dir := t.TempDir()
-	// 手工写入一行坏数据 + 一行好数据
+	// Hand-write one bad line + one good line.
 	line := `{"role":"user","content":"ok"}` + "\n" + `{not-json}\n`
 	if err := os.WriteFile(filepath.Join(dir, "s1.jsonl"), []byte(line), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -77,12 +78,12 @@ func TestBufferAndPersistentSameTruncation(t *testing.T) {
 		{Role: core.RoleAssistant, Content: "2"},
 		{Role: core.RoleUser, Content: "3"},
 	}
-	buf := memory.NewBuffer(nil)
+	buf := memorytest.NewBuffer(nil)
 	_ = buf.Add(ctx, "s", mk...)
 	per, _ := memory.NewPersistent(t.TempDir(), nil)
 	_ = per.Add(ctx, "s", mk...)
 
-	b1, _ := buf.Recent(ctx, "s", 2) // 预算只够系统消息+1条
+	b1, _ := buf.Recent(ctx, "s", 2) // budget only covers the system message + 1 more
 	b2, _ := per.Recent(ctx, "s", 2)
 	if len(b1) != len(b2) {
 		t.Fatalf("buffer=%d persistent=%d", len(b1), len(b2))

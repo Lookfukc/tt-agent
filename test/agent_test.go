@@ -8,22 +8,22 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
-// scriptedLLM 按脚本逐轮返回预设消息
+// scriptedLLM returns scripted messages turn by turn.
 type scriptedLLM struct {
 	calls int
 	turns []core.Message
 }
 
-// Chat 未使用，循环统一走流式
+// Chat is unused; the loop always goes through streaming.
 func (s *scriptedLLM) Chat(context.Context, core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, errors.New("not implemented")
 }
 
-// ChatStream 以异步事件流返回本轮预设消息，对齐真实适配器的生产者契约
+// ChatStream returns this turn's scripted message as an async event stream, matching the producer contract of real adapters.
 func (s *scriptedLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	msg := s.turns[min(s.calls, len(s.turns)-1)]
 	s.calls++
@@ -42,24 +42,24 @@ func (s *scriptedLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan 
 	return events, nil
 }
 
-// stubTool 记录调用的测试工具
+// stubTool is a test tool that records its invocations.
 type stubTool struct{ executed []string }
 
-// loopConfig 测试用循环配置，熔断上限 3 轮
+// loopConfig is the loop config used in tests, with a circuit-breaker cap of 3 iterations.
 func loopConfig() agent.Config {
 	return agent.Config{Model: "m", MaxIterations: 3}
 }
 
-// Name 工具名
+// Name returns the tool name.
 func (s *stubTool) Name() string { return "echo" }
 
-// Description 工具描述
+// Description returns the tool description.
 func (s *stubTool) Description() string { return "echo" }
 
-// Parameters 参数 schema
+// Parameters returns the parameter schema.
 func (s *stubTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
-// Execute 记录参数并回显
+// Execute records the arguments and echoes them back.
 func (s *stubTool) Execute(_ context.Context, args json.RawMessage) (core.ToolResult, error) {
 	s.executed = append(s.executed, string(args))
 	return core.ToolResult{Text: "echoed"}, nil
@@ -76,7 +76,7 @@ func TestLoopToolCallRoundTrip(t *testing.T) {
 	tool := &stubTool{}
 	reg := tools.NewRegistry()
 	reg.Register(tool)
-	mem := memory.NewBuffer(nil)
+	mem := memorytest.NewBuffer(nil)
 
 	loop := agent.NewLoop(llm, reg, mem, agent.Config{Model: "m", MaxIterations: 4})
 	msg, _, err := loop.Run(context.Background(), "s1", "调用工具")
@@ -104,7 +104,7 @@ func TestLoopToolCallRoundTrip(t *testing.T) {
 }
 
 func TestLoopMaxIterations(t *testing.T) {
-	// 每轮都要求工具调用，验证熔断
+	// Every turn requests a tool call, verifying the circuit breaker.
 	always := core.Message{
 		Role: core.RoleAssistant, FinishReason: core.FinishToolCalls,
 		ToolCalls: []core.ToolCall{{ID: "t1", Name: "echo", Arguments: `{}`}},
@@ -113,7 +113,7 @@ func TestLoopMaxIterations(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&stubTool{})
 
-	loop := agent.NewLoop(llm, reg, memory.NewBuffer(nil), loopConfig())
+	loop := agent.NewLoop(llm, reg, memorytest.NewBuffer(nil), loopConfig())
 	_, _, err := loop.Run(context.Background(), "s1", "go")
 	if !errors.Is(err, agent.ErrMaxIterations) {
 		t.Fatalf("err = %v, want ErrMaxIterations", err)
@@ -131,7 +131,7 @@ func TestLoopToolFailureFeedsModel(t *testing.T) {
 		},
 		{Role: core.RoleAssistant, Content: "工具不存在，改用直接回答"},
 	}}
-	loop := agent.NewLoop(llm, tools.NewRegistry(), memory.NewBuffer(nil), loopConfig())
+	loop := agent.NewLoop(llm, tools.NewRegistry(), memorytest.NewBuffer(nil), loopConfig())
 
 	msg, _, err := loop.Run(context.Background(), "s1", "go")
 	if err != nil {

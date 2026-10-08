@@ -6,7 +6,7 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/observer"
 	"github.com/Lookfukc/tt-agent/pkg/orchestrator"
 	"github.com/Lookfukc/tt-agent/pkg/tools"
@@ -24,7 +24,7 @@ func TestLoopSpans(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(&stubTool{})
 
-	loop := agent.NewLoop(llm, reg, memory.NewBuffer(nil), agent.Config{
+	loop := agent.NewLoop(llm, reg, memorytest.NewBuffer(nil), agent.Config{
 		Model: "m", MaxIterations: 4, Tracer: tracer,
 	})
 	if _, _, err := loop.Run(context.Background(), "s1", "go"); err != nil {
@@ -51,7 +51,7 @@ func TestLoopSpans(t *testing.T) {
 		t.Errorf("traces = %d, want 1", tracer.TraceCount())
 	}
 
-	// 树结构：除根外每个 span 的 ParentID 都能在集合里找到
+	// Tree structure: every span's ParentID except the root's can be found in the set
 	ids := make(map[string]bool)
 	for _, s := range spans {
 		ids[s.SpanID] = true
@@ -68,7 +68,7 @@ func TestLoopSpans(t *testing.T) {
 		t.Errorf("roots = %d, want 1 (agent.run)", roots)
 	}
 
-	// tool span 携带工具名属性
+	// Tool spans carry the tool name attribute
 	for _, s := range spans {
 		if s.Name == "tool.exec" && s.Attributes["tool"] != "echo" {
 			t.Errorf("tool span attrs = %v", s.Attributes)
@@ -81,7 +81,7 @@ func TestWorkflowSpans(t *testing.T) {
 	o := orchestrator.New(nil)
 	o.Tracer = tracer
 	mk := func() *agent.Loop {
-		return agent.NewLoop(echoLLM{}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		return agent.NewLoop(echoLLM{}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	}
 	o.RegisterAgent("writer", mk())
 	_ = o.RegisterWorkflow(&orchestrator.Workflow{

@@ -11,7 +11,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/observer"
 )
 
-// errFake 测试用错误
+// errFake returns a test error.
 func errFake() error { return errors.New("boom") }
 
 func TestMetricsRecordAndSnapshot(t *testing.T) {
@@ -27,7 +27,7 @@ func TestMetricsRecordAndSnapshot(t *testing.T) {
 	if snap["glm"].Calls != 1 || snap["glm"].Errors != 1 {
 		t.Errorf("glm = %+v", snap["glm"])
 	}
-	// 副本语义：改快照不影响内部
+	// Copy semantics: mutating the snapshot must not affect internal state.
 	delete(snap, "deepseek")
 	if len(m.Snapshot()) != 2 {
 		t.Error("snapshot must be a copy")
@@ -39,7 +39,7 @@ func TestMetricsEndpoint(t *testing.T) {
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
-	// 先打一次 chat 产生指标
+	// Hit chat once first to produce metrics.
 	_, _ = ts.Client().Post(ts.URL+"/api/chat", "application/json",
 		strings.NewReader(`{"input":"hi"}`))
 

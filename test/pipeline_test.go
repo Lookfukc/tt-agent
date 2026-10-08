@@ -8,13 +8,13 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// flakyLLM 前 failN 次返回可重试错误，之后成功
+// flakyLLM returns a retryable error for the first failN calls, then succeeds.
 type flakyLLM struct {
 	failN int
 	calls int
 }
 
-// Chat 按失败计数返回错误或成功响应
+// Chat returns an error or a success response based on the failure count.
 func (f *flakyLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	f.calls++
 	if f.calls <= f.failN {
@@ -23,7 +23,7 @@ func (f *flakyLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatRespon
 	return &core.ChatResponse{Content: "ok"}, nil
 }
 
-// ChatStream 流式失败：首事件即 StreamError（未产出内容）
+// ChatStream fails in streaming mode: StreamError as the first event (no content produced).
 func (f *flakyLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	f.calls++
 	events := make(chan core.StreamEvent, 2)
@@ -97,15 +97,15 @@ func TestStreamRetryBeforeFirstToken(t *testing.T) {
 	}
 }
 
-// fatalStreamLLM 永远返回不可重试的流错误
+// fatalStreamLLM always returns a non-retryable stream error.
 type fatalStreamLLM struct{ calls int }
 
-// Chat 未使用
+// Chat is unused.
 func (f *fatalStreamLLM) Chat(context.Context, core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, errors.New("not implemented")
 }
 
-// ChatStream 返回鉴权类流错误
+// ChatStream returns an auth-class stream error.
 func (f *fatalStreamLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	f.calls++
 	events := make(chan core.StreamEvent, 1)

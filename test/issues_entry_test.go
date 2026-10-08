@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// writeUnmasked 发送不带掩码位的帧（协议违规形态）
+// writeUnmasked sends a frame without the mask bit set (a protocol-violating form)
 func (c *wsTestClient) writeUnmasked(op int, data []byte) {
 	frame := []byte{byte(0x80 | op), byte(len(data))}
 	frame = append(frame, data...)
@@ -17,8 +17,8 @@ func (c *wsTestClient) writeUnmasked(op int, data []byte) {
 	}
 }
 
-// dialRaw 裸 TCP 连接（不做 WS 握手）
-// returns: 原始连接
+// dialRaw makes a raw TCP connection (no WS handshake)
+// returns: the raw connection
 func dialRaw(t *testing.T, url string) net.Conn {
 	t.Helper()
 	conn, err := net.DialTimeout("tcp", strings.TrimPrefix(url, "http://"), 5*time.Second)
@@ -28,7 +28,7 @@ func dialRaw(t *testing.T, url string) net.Conn {
 	return conn
 }
 
-// TestM_E3UnmaskedFrameRejected 未掩码客户端帧必须拒绝（RFC6455 §5.1）
+// TestM_E3UnmaskedFrameRejected verifies an unmasked client frame must be rejected (RFC6455 §5.1)
 func TestM_E3UnmaskedFrameRejected(t *testing.T) {
 	srv := newTestServer(t, &streamMockLLM{})
 	ts := httptest.NewServer(srv.Handler())
@@ -38,12 +38,12 @@ func TestM_E3UnmaskedFrameRejected(t *testing.T) {
 	defer client.conn.Close()
 
 	client.writeUnmasked(1, []byte(`{"input":"hi"}`))
-	// 未掩码帧必须以携带 1002 的关闭帧（opcode 8）失败连接，
-	// 而不是被当作消息处理
+	// An unmasked frame must fail the connection with a close frame (opcode 8)
+	// carrying 1002, rather than being processed as a message
 	client.readCloseFrame(t, 1002)
 }
 
-// TestM_E4OriginRejected 跨源 WS 握手必须 403
+// TestM_E4OriginRejected verifies a cross-origin WS handshake must get 403
 func TestM_E4OriginRejected(t *testing.T) {
 	srv := newTestServer(t, &streamMockLLM{})
 	ts := httptest.NewServer(srv.Handler())
@@ -66,7 +66,7 @@ func TestM_E4OriginRejected(t *testing.T) {
 	}
 }
 
-// TestM_E5BodyLimit 超限请求体必须 400 而非全量吞入
+// TestM_E5BodyLimit verifies an over-limit request body must get 400 instead of being swallowed in full
 func TestM_E5BodyLimit(t *testing.T) {
 	srv := newTestServer(t, &streamMockLLM{})
 	ts := httptest.NewServer(srv.Handler())

@@ -8,7 +8,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-// gRPC 服务契约（等价 .proto 定义）：
+// gRPC service contract (equivalent .proto definition):
 //
 // package agentframework;
 // service AgentService {
@@ -21,8 +21,10 @@ import (
 //                        int64 input_tokens=5; int64 output_tokens=6; int64 reasoning_tokens=7;
 //                        double cost_usd=8; }
 //
-// 环境离线无 protoc，用运行时构造的 descriptor + dynamicpb 替代生成代码；
-// 消息只含标量类型，无需任何 WKT 依赖，protodesc 可独立编译
+// The build environment is offline with no protoc available, so we use a
+// runtime-constructed descriptor + dynamicpb instead of generated code;
+// the messages contain only scalar types, need no WKT dependencies, and
+// protodesc compiles standalone
 
 const (
 	grpcServiceName = "agentframework.AgentService"
@@ -36,7 +38,7 @@ var (
 	chatRespDesc protoreflect.MessageDescriptor
 )
 
-// 初始化运行时 descriptor
+// init initializes the runtime descriptor.
 func init() {
 	str := func(s string) *string { return proto.String(s) }
 	pbString := descriptorpb.FieldDescriptorProto_TYPE_STRING
@@ -104,7 +106,8 @@ func init() {
 
 	parsed, err := protodesc.NewFile(file, nil)
 	if err != nil {
-		// descriptor 是编译期常量，构造失败属编程错误，panic 快速暴露
+		// The descriptor is a compile-time constant; a construction
+		// failure is a programming error, so panic to expose it fast.
 		panic("entry: bad grpc descriptor: " + err.Error())
 	}
 	grpcFileDesc = parsed
@@ -112,18 +115,19 @@ func init() {
 	chatRespDesc = parsed.Messages().ByName("ChatResponse")
 }
 
-// GRPCChatRequestDesc 暴露请求消息描述符，供无生成代码的客户端构造动态消息
-// returns: ChatRequest 的 MessageDescriptor
+// GRPCChatRequestDesc exposes the request message descriptor so clients
+// without generated code can construct dynamic messages.
+// returns: the MessageDescriptor of ChatRequest.
 func GRPCChatRequestDesc() protoreflect.MessageDescriptor { return chatReqDesc }
 
-// GRPCChatResponseDesc 暴露响应消息描述符
-// returns: ChatResponse 的 MessageDescriptor
+// GRPCChatResponseDesc exposes the response message descriptor.
+// returns: the MessageDescriptor of ChatResponse.
 func GRPCChatResponseDesc() protoreflect.MessageDescriptor { return chatRespDesc }
 
-// dynStr 读动态消息字符串字段
-// msg: 动态消息
-// name: 字段名
-// returns: 字段值，缺字段返回空串
+// dynStr reads a string field from a dynamic message.
+// msg: the dynamic message.
+// name: the field name.
+// returns: the field value, or an empty string if the field is absent.
 func dynStr(msg *dynamicpb.Message, name string) string {
 	f := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
 	if f == nil || !msg.Has(f) {
@@ -132,7 +136,7 @@ func dynStr(msg *dynamicpb.Message, name string) string {
 	return msg.Get(f).String()
 }
 
-// setDynStr 写动态消息字符串字段
+// setDynStr writes a string field of a dynamic message.
 func setDynStr(msg *dynamicpb.Message, name, value string) {
 	f := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
 	if value != "" {
@@ -140,7 +144,7 @@ func setDynStr(msg *dynamicpb.Message, name, value string) {
 	}
 }
 
-// setDynInt 写动态消息整数字段
+// setDynInt writes an integer field of a dynamic message.
 func setDynInt(msg *dynamicpb.Message, name string, value int64) {
 	f := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
 	if value != 0 {
@@ -148,7 +152,7 @@ func setDynInt(msg *dynamicpb.Message, name string, value int64) {
 	}
 }
 
-// setDynFloat 写动态消息浮点字段
+// setDynFloat writes a float field of a dynamic message.
 func setDynFloat(msg *dynamicpb.Message, name string, value float64) {
 	f := msg.Descriptor().Fields().ByName(protoreflect.Name(name))
 	if value != 0 {

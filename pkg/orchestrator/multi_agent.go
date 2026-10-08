@@ -6,57 +6,60 @@ import (
 	"strings"
 )
 
-// routerPromptPrefix 路由指令前缀，约束分类 Agent 只输出候选名
+// routerPromptPrefix is the routing instruction prefix, constraining the
+// classifier agent to output only a candidate name.
 const routerPromptPrefix = "从以下候选中选择最合适处理该输入的一个，只输出名字本身，不要任何其他内容。候选："
 
-// RouterStep 路由步骤
+// RouterStep is a routing step.
 //
-// 先用分类 Agent 从候选中选出一个执行 Agent，再把输入交给它；
-// 分类输出不在候选内时步骤失败，不做模糊匹配
+// A classifier agent first picks one executing agent from the candidates,
+// then hands the input to it; if the classifier's output is not among the
+// candidates the step fails — no fuzzy matching.
 type RouterStep struct {
-	// Name 步骤名
+	// Name is the step name.
 	Name string
-	// Router 分类 Agent 名，其输出必须是 Candidates 之一
+	// Router is the classifier agent name; its output must be one of Candidates.
 	Router string
-	// Candidates 可选执行 Agent 名单
+	// Candidates is the list of candidate executing agent names.
 	Candidates []string
-	// Input 交给被选 Agent 的输入模板
+	// Input is the input template handed to the picked agent.
 	Input string
 }
 
-// stepKind 实现 Step 接口
+// stepKind implements the Step interface.
 func (RouterStep) stepKind() {}
 
-// supervisor 协议常量
+// supervisor protocol constants
 const (
 	superVisorWorker = "WORKER"
 	superVisorDone   = "DONE"
 	superVisorMaxDef = 8
 )
 
-// SupervisorStep 监督者步骤
+// SupervisorStep is a supervisor step.
 //
-// 监督 Agent 循环分解任务并委派工人 Agent，协议为纯文本：
-// 首行 WORKER <name> 时委派，余下为任务说明；
-// 首行 DONE 时收敛，余下为最终答案
+// A supervisor agent decomposes tasks in a loop and delegates to worker
+// agents, using a plain-text protocol: a first line of WORKER <name>
+// delegates, with the remainder as the task description; a first line of
+// DONE converges, with the remainder as the final answer.
 type SupervisorStep struct {
-	// Name 步骤名
+	// Name is the step name.
 	Name string
-	// Supervisor 监督 Agent 名
+	// Supervisor is the supervisor agent name.
 	Supervisor string
-	// Workers 可委派的工人 Agent 名单
+	// Workers is the list of worker agents that may be delegated to.
 	Workers []string
-	// Input 初始任务模板
+	// Input is the initial task template.
 	Input string
-	// MaxRounds 最大轮数，0 取默认 8
+	// MaxRounds is the round limit; 0 takes the default of 8.
 	MaxRounds int
 }
 
-// stepKind 实现 Step 接口
+// stepKind implements the Step interface.
 func (SupervisorStep) stepKind() {}
 
-// runRouterStep 执行路由
-// returns: 被选 Agent 的输出写入 run 后返回 nil
+// runRouterStep executes the routing.
+// returns: nil after the picked agent's output is written into the run
 func (o *Orchestrator) runRouterStep(ctx context.Context, run *RunState, s RouterStep) error {
 	o.mu.RLock()
 	router, ok := o.agents[s.Router]
@@ -81,13 +84,14 @@ func (o *Orchestrator) runRouterStep(ctx context.Context, run *RunState, s Route
 	if err := o.runAgentStep(ctx, run, target); err != nil {
 		return err
 	}
-	// 路由决策也落输出，便于排查
+	// The routing decision is also recorded as an output, for easier
+	// troubleshooting
 	run.Outputs[routerKey(stepAlias(s.Name, s.Router))] = picked
 	o.save(run)
 	return nil
 }
 
-// runSupervisorStep 执行监督循环
+// runSupervisorStep executes the supervision loop.
 func (o *Orchestrator) runSupervisorStep(ctx context.Context, run *RunState, s SupervisorStep) error {
 	o.mu.RLock()
 	sup, ok := o.agents[s.Supervisor]
@@ -150,8 +154,8 @@ func (o *Orchestrator) runSupervisorStep(ctx context.Context, run *RunState, s S
 	return fmt.Errorf("supervisor exceeded %d rounds", maxRounds)
 }
 
-// supervisorPrompt 组装监督 Agent 的输入
-// returns: 含工人名单与当前进展记录的提示
+// supervisorPrompt assembles the supervisor agent's input.
+// returns: the prompt containing the worker list and the current progress record
 func supervisorPrompt(workers []string, transcript string) string {
 	var b strings.Builder
 	b.WriteString("你是任务监督者。每轮回复首行必须是以下两种之一：\n")
@@ -162,18 +166,20 @@ func supervisorPrompt(workers []string, transcript string) string {
 	return b.String()
 }
 
-// agentStepOf 用步骤名与 Agent 名合成一个 AgentStep 以复用 sessionID
-// returns: 合成步骤
+// agentStepOf synthesizes an AgentStep from a step name and an agent name
+// to reuse sessionID.
+// returns: the synthesized step
 func agentStepOf(name, agentName string) AgentStep {
 	return AgentStep{Name: name, Agent: agentName}
 }
 
-// routerKey 路由决策的输出键
-// returns: 步骤名加后缀
+// routerKey is the output key for a routing decision.
+// returns: the step name plus a suffix
 func routerKey(name string) string { return name + ":route" }
 
-// stepAlias 步骤输出键，Name 为空时退回 agent 名
-// returns: 输出键
+// stepAlias is the step output key, falling back to the agent name when
+// Name is empty.
+// returns: the output key
 func stepAlias(name, fallback string) string {
 	if name != "" {
 		return name
@@ -181,8 +187,8 @@ func stepAlias(name, fallback string) string {
 	return fallback
 }
 
-// contains 线性包含判断
-// returns: true 表示存在
+// contains is a linear containment check.
+// returns: true if present
 func contains(list []string, v string) bool {
 	for _, item := range list {
 		if item == v {

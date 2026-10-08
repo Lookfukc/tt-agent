@@ -12,12 +12,12 @@ import (
 
 func TestCostOf(t *testing.T) {
 	m := provider.ModelConfig{InputPricePerMtok: 4, OutputPricePerMtok: 16}
-	// 1M 输入 + 0.5M 输出 = 4 + 8 = 12 美元
+	// 1M input + 0.5M output = 4 + 8 = 12 USD.
 	cost := m.CostOf(core.Usage{InputTokens: 1_000_000, OutputTokens: 500_000})
 	if cost < 11.99 || cost > 12.01 {
 		t.Errorf("cost = %f, want ~12", cost)
 	}
-	// 思考 token 计入输出侧
+	// Reasoning tokens are billed on the output side.
 	cost = m.CostOf(core.Usage{OutputTokens: 250_000, ReasoningTokens: 250_000})
 	if cost < 7.99 || cost > 8.01 {
 		t.Errorf("cost with reasoning = %f, want ~8", cost)

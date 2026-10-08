@@ -1,4 +1,5 @@
-// Package main 演示从注册表装配 Provider 到 Agent 循环的完整链路
+// Package main demonstrates the complete chain from assembling
+// providers via the registry to the Agent loop.
 package main
 
 import (
@@ -15,8 +16,9 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
-// 厂商配置即代码：需要几家写几家，行为偏差用命名 quirks，
-// 密钥一律走环境变量（APIKeyEnv），不落代码
+// Vendor configuration as code: write as many as you need, express
+// behavioral deviations as named quirks, and always take secrets from
+// environment variables (APIKeyEnv) — never hardcode them.
 func buildProviders() []provider.ProviderConfig {
 	deepseekQuirks, _ := provider.ComposeQuirks([]string{"deepseek-reasoner"}, "openai")
 	glmQuirks, _ := provider.ComposeQuirks([]string{"glm-thinking"}, "openai")
@@ -55,7 +57,7 @@ func main() {
 		registry.Register(&customs[i])
 	}
 
-	// 默认取首个厂商，AGENT_PROVIDER 显式覆盖
+	// Default to the first vendor; AGENT_PROVIDER overrides explicitly.
 	providerID := customs[0].ID
 	if v := os.Getenv("AGENT_PROVIDER"); v != "" {
 		providerID = v
@@ -80,7 +82,15 @@ func main() {
 	toolReg := tools.NewRegistry()
 	toolReg.Register(echoTool{})
 
-	loop := agent.NewLoop(wrapped, toolReg, memory.NewBuffer(nil), agent.Config{
+	// Session memory: persisted to disk so conversations can continue
+	// after restart.
+	mem, err := memory.NewPersistent("./sessions", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+
+	loop := agent.NewLoop(wrapped, toolReg, mem, agent.Config{
 		Model:        cfg.DefaultModel,
 		SystemPrompt: "你是一个简洁的助手，必要时使用工具",
 		OnEvent: func(e agent.LoopEvent) {
@@ -111,21 +121,21 @@ func main() {
 	_ = msg
 }
 
-// echoTool 演示用回声工具
+// echoTool is a demonstration echo tool.
 type echoTool struct{}
 
-// Name 工具名
+// Name returns the tool name.
 func (echoTool) Name() string { return "echo" }
 
-// Description 工具描述
+// Description returns the tool description.
 func (echoTool) Description() string { return "原样返回输入的文本" }
 
-// Parameters 参数 schema
+// Parameters returns the parameter schema.
 func (echoTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"text":{"type":"string","description":"要回显的文本"}},"required":["text"]}`)
 }
 
-// Execute 回显输入
+// Execute echoes back the input.
 func (echoTool) Execute(_ context.Context, args json.RawMessage) (core.ToolResult, error) {
 	var in struct {
 		Text string `json:"text"`

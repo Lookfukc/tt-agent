@@ -84,7 +84,7 @@ func TestAnthropicChatStream(t *testing.T) {
 	if msg.FinishReason != core.FinishToolCalls {
 		t.Errorf("finish = %q", msg.FinishReason)
 	}
-	// 两段 usage 字段级合并：input 来自 message_start，output 来自 message_delta
+	// Usage fields are merged across segments: input from message_start, output from message_delta.
 	if usage.InputTokens != 25 || usage.OutputTokens != 9 {
 		t.Errorf("usage = %+v", usage)
 	}
@@ -115,7 +115,7 @@ func TestAnthropicSystemAndToolResultBlocks(t *testing.T) {
 		t.Errorf("system = %v", gotBody["system"])
 	}
 	msgs := gotBody["messages"].([]any)
-	// assistant 带 tool_use 块 + user 带 tool_result 块
+	// assistant message carries a tool_use block + user message carries a tool_result block
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %v", msgs)
 	}

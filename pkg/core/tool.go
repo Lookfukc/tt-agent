@@ -5,21 +5,23 @@ import (
 	"encoding/json"
 )
 
-// ToolResult 工具执行结果，支持多形态以适配 vision 与结构化场景
+// ToolResult is the result of a tool execution, supporting multiple shapes to
+// accommodate vision and structured-output scenarios.
 type ToolResult struct {
-	// Text 文本结果，直接作为 tool 消息内容回传
+	// Text is the text result, sent back directly as the tool message content.
 	Text string
 
-	// Data 结构化结果，为空时不回传；适配器负责序列化
+	// Data is the structured result; omitted when empty. The adapter is
+	// responsible for serializing it.
 	Data any
 
-	// Images 图片结果（URL 或 base64），供 vision 模型消费
-	// TODO: Message 支持多模态 content parts 后接入
+	// Images holds image results (URLs or base64) for vision models to consume.
+	// TODO: wire in once Message supports multimodal content parts.
 	Images []string
 }
 
-// Render 将结果渲染为回传给模型的字符串
-// returns: Data 存在时返回其 JSON 序列化，否则返回 Text
+// Render renders the result as the string sent back to the model.
+// returns: the JSON serialization of Data when present, otherwise Text
 func (r ToolResult) Render() string {
 	if r.Data != nil {
 		if b, err := json.Marshal(r.Data); err == nil {
@@ -29,28 +31,32 @@ func (r ToolResult) Render() string {
 	return r.Text
 }
 
-// Tool 工具抽象，框架内所有工具实现此接口
+// Tool is the tool abstraction; all tools in the framework implement this interface.
 type Tool interface {
-	// Name 工具唯一标识
+	// Name is the unique tool identifier.
 	Name() string
 
-	// Description 供模型理解工具用途的自然语言描述
+	// Description is the natural-language description for the model to
+	// understand the tool's purpose.
 	Description() string
 
-	// Parameters 参数的 JSON Schema
+	// Parameters is the JSON Schema of the parameters.
 	Parameters() json.RawMessage
 
-	// Execute 执行工具
-	// ctx: 承载超时与取消，长任务必须响应
-	// args: 模型给出的参数 JSON，格式合法由实现方校验
-	// returns: 执行结果与非 nil 错误；错误会作为工具失败信息回传模型
+	// Execute runs the tool.
+	// ctx: carries timeout and cancellation; long tasks must respond to it
+	// args: the parameter JSON given by the model; validating its format is
+	// the implementation's responsibility
+	// returns: the execution result and a non-nil error; the error is sent
+	// back to the model as the tool-failure message
 	Execute(ctx context.Context, args json.RawMessage) (ToolResult, error)
 }
 
-// ToolFunc 函数式工具，便于将普通函数快速注册为工具
+// ToolFunc is a functional tool, making it easy to register plain functions
+// as tools.
 type ToolFunc func(ctx context.Context, args json.RawMessage) (ToolResult, error)
 
-// Execute 实现 Tool 接口
+// Execute implements the Tool interface.
 func (f ToolFunc) Execute(ctx context.Context, args json.RawMessage) (ToolResult, error) {
 	return f(ctx, args)
 }

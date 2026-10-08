@@ -13,31 +13,31 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/tools/mcp"
 )
 
-// duplex 拼接两条单向管道成双向传输
+// duplex joins two one-way pipes into a bidirectional transport.
 type duplex struct {
 	r io.ReadCloser
 	w io.WriteCloser
 }
 
-// Read 读
+// Read reads from the underlying reader.
 func (d duplex) Read(p []byte) (int, error) { return d.r.Read(p) }
 
-// Write 写
+// Write writes to the underlying writer.
 func (d duplex) Write(p []byte) (int, error) { return d.w.Write(p) }
 
-// Close 关闭两端
+// Close closes both ends.
 func (d duplex) Close() error {
 	d.r.Close()
 	return d.w.Close()
 }
 
-// fakeMCPServer 内存中的 MCP 服务器：echo 工具回显，fail 工具报错
+// fakeMCPServer is an in-memory MCP server: the echo tool echoes, the fail tool errors.
 type fakeMCPServer struct {
 	mu       sync.Mutex
 	initSeen bool
 }
 
-// serve 在 duplex 上应答 JSON-RPC
+// serve answers JSON-RPC over the duplex transport.
 func (s *fakeMCPServer) serve(rw io.ReadWriteCloser) {
 	scanner := bufio.NewScanner(rw)
 	encoder := json.NewEncoder(rw)
@@ -51,7 +51,7 @@ func (s *fakeMCPServer) serve(rw io.ReadWriteCloser) {
 			continue
 		}
 		if req.ID == 0 {
-			// 通知
+			// notification
 			if req.Method == "notifications/initialized" {
 				s.mu.Lock()
 				s.initSeen = true
@@ -70,22 +70,22 @@ func (s *fakeMCPServer) serve(rw io.ReadWriteCloser) {
 	}
 }
 
-// fakeRPCError 假服务器的 RPC 错误
+// fakeRPCError is the fake server's RPC error.
 type fakeRPCError struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
 }
 
-// initialized 线程安全地读取握手通知状态
-// returns: true 表示已收到 initialized 通知
+// initialized reads the handshake notification state thread-safely.
+// returns: true if the initialized notification has been received.
 func (s *fakeMCPServer) initialized() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.initSeen
 }
 
-// dispatch 按方法路由
-// returns: result 或 RPC 错误
+// dispatch routes by method.
+// returns: a result or an RPC error.
 func (s *fakeMCPServer) dispatch(method string, params map[string]any) (any, *fakeRPCError) {
 	rpcFail := func(msg string) *fakeRPCError {
 		return &fakeRPCError{Code: -32000, Message: msg}
@@ -133,12 +133,12 @@ func (s *fakeMCPServer) dispatch(method string, params map[string]any) (any, *fa
 	}
 }
 
-// newMCPPair 建立客户端与假服务器的内存连接
-// returns: 客户端与服务器实例
+// newMCPPair sets up an in-memory connection between the client and the fake server.
+// returns: the client and the server instance.
 func newMCPPair(t *testing.T) (*mcp.Client, *fakeMCPServer) {
 	t.Helper()
-	cRead, cWrite := io.Pipe() // 服务器 → 客户端
-	sRead, sWrite := io.Pipe() // 客户端 → 服务器
+	cRead, cWrite := io.Pipe() // server → client
+	sRead, sWrite := io.Pipe() // client → server
 	server := &fakeMCPServer{}
 	go server.serve(duplex{r: sRead, w: cWrite})
 	client := mcp.NewClient(duplex{r: cRead, w: sWrite}, "fake")
@@ -153,7 +153,7 @@ func TestMCPClientLifecycle(t *testing.T) {
 	if err := client.Connect(ctx); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	// notify 是 fire-and-forget 写出，服务器处理存在调度延迟，轮询确认
+	// The notify is a fire-and-forget write; the server processes it with scheduling delay, so poll to confirm.
 	deadline := time.Now().Add(2 * time.Second)
 	for !server.initialized() && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)

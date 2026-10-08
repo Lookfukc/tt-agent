@@ -14,16 +14,16 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/entry"
 )
 
-// streamMockLLM 返回固定文本流的 mock
+// streamMockLLM is a mock that returns a fixed text stream.
 type streamMockLLM struct{ calls int }
 
-// Chat 返回固定响应
+// Chat returns a fixed response.
 func (m *streamMockLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	m.calls++
 	return &core.ChatResponse{Content: "hi", Usage: core.Usage{InputTokens: 3, OutputTokens: 2}}, nil
 }
 
-// ChatStream 返回两段文本增量
+// ChatStream returns two text deltas.
 func (m *streamMockLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	m.calls++
 	events := make(chan core.StreamEvent, 4)
@@ -37,15 +37,15 @@ func (m *streamMockLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-cha
 	return events, nil
 }
 
-// errorMockLLM 永远失败
+// errorMockLLM always fails.
 type errorMockLLM struct{}
 
-// Chat 返回不可重试错误
+// Chat returns a non-retryable error.
 func (errorMockLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, core.NewError(core.ErrAuth, "mock", errors.New("bad key"))
 }
 
-// ChatStream 返回不可重试流错误
+// ChatStream returns a non-retryable stream error.
 func (errorMockLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	events := make(chan core.StreamEvent, 1)
 	events <- core.StreamEvent{Type: core.StreamError, Err: core.NewError(core.ErrAuth, "mock", errors.New("bad key"))}
@@ -53,7 +53,7 @@ func (errorMockLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan co
 	return events, nil
 }
 
-// newTestServer 注入 mock LLM 的测试服务
+// newTestServer builds a test server with a mock LLM injected.
 func newTestServer(t *testing.T, llm core.LLM) *entry.Server {
 	t.Helper()
 	reg := provider.NewRegistry()

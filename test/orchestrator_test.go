@@ -7,19 +7,19 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/orchestrator"
 )
 
-// echoLLM 把收到的用户输入原样返回，便于断言模板解析
+// echoLLM returns the received user input verbatim, making template resolution easy to assert.
 type echoLLM struct{}
 
-// Chat 未使用
+// Chat is unused.
 func (echoLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, errors.New("not implemented")
 }
 
-// ChatStream 把首条 user 消息内容作为输出返回
+// ChatStream returns the first user message's content as output.
 func (echoLLM) ChatStream(_ context.Context, req core.ChatRequest) (<-chan core.StreamEvent, error) {
 	var input string
 	for _, m := range req.Messages {
@@ -37,12 +37,12 @@ func (echoLLM) ChatStream(_ context.Context, req core.ChatRequest) (<-chan core.
 	return events, nil
 }
 
-// newOrchestrator 装配双 Agent 编排器：writer 与 reviewer
+// newOrchestrator assembles a two-agent orchestrator: writer and reviewer.
 func newOrchestrator(t *testing.T, store orchestrator.RunStore) *orchestrator.Orchestrator {
 	t.Helper()
 	o := orchestrator.New(store)
 	mk := func() *agent.Loop {
-		return agent.NewLoop(echoLLM{}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		return agent.NewLoop(echoLLM{}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	}
 	o.RegisterAgent("writer", mk())
 	o.RegisterAgent("reviewer", mk())
@@ -116,7 +116,7 @@ func TestCheckpointPauseAndResume(t *testing.T) {
 		t.Errorf("run = %+v", run)
 	}
 
-	// 模拟重启：工作流定义随代码重新注册，运行状态来自落盘
+	// Simulate a restart: the workflow definition is re-registered with the code, run state comes from disk.
 	o2 := newOrchestrator(t, store)
 	_ = o2.RegisterWorkflow(&orchestrator.Workflow{
 		Name: "review",

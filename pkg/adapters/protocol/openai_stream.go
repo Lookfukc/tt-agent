@@ -10,7 +10,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// streamChunk 单个 SSE data 行对应的 JSON 增量
+// streamChunk is the JSON increment corresponding to a single SSE data line.
 type streamChunk struct {
 	Choices []struct {
 		Index int `json:"index"`
@@ -27,7 +27,7 @@ type streamChunk struct {
 	} `json:"error"`
 }
 
-// openAIToolDelta 工具调用分片
+// openAIToolDelta is a tool call fragment.
 type openAIToolDelta struct {
 	Index    int    `json:"index"`
 	ID       string `json:"id"`
@@ -37,10 +37,11 @@ type openAIToolDelta struct {
 	} `json:"function"`
 }
 
-// ChatStream 发送流式对话请求
+// ChatStream sends a streaming chat request.
 //
-// 首事件前的错误（网络/鉴权/4xx）同步返回；建立连接后的所有
-// 内容与错误走事件 channel，语义见 core.StreamEvent
+// Errors before the first event (network/auth/4xx) are returned synchronously;
+// all content and errors after the connection is established flow through the
+// event channel, with semantics defined by core.StreamEvent.
 func (p *OpenAIProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (<-chan core.StreamEvent, error) {
 	body, err := p.buildBody(req, true)
 	if err != nil {
@@ -59,17 +60,19 @@ func (p *OpenAIProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (
 	events := make(chan core.StreamEvent, 16)
 	go func() {
 		defer close(events)
-		// 泄漏防线：流读尽后必须关闭响应体，否则每次调用漏一个连接
+		// Leak guard: the response body must be closed once the stream is drained,
+		// otherwise every call leaks one connection.
 		defer resp.Body.Close()
-		// decoder 持有跨 chunk 状态，不可复用
+		// The decoder holds cross-chunk state and must not be reused.
 		d := newStreamDecoder(resp)
 		emit := func(e core.StreamEvent) bool {
 			select {
 			case events <- e:
 				return true
 			case <-ctx.Done():
-				// 契约：取消也必须发终止错误事件，静默关闭会让
-				// 半截内容被当成完整回答返回
+				// Contract: cancellation must also emit a terminal error event;
+				// closing silently would let truncated content be returned as a
+				// complete answer.
 				select {
 				case events <- core.StreamEvent{
 					Type: core.StreamError,
@@ -91,8 +94,9 @@ func (p *OpenAIProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (
 				return
 			}
 			if done {
-				// 终止事件只此一处：finish_reason chunk 只记原因不发声，
-				// usage 在其后到达，首个 Done 即终止的消费者不能丢掉它
+				// The terminal event is emitted only here: the finish_reason chunk
+				// only records the reason without emitting, and usage arrives after
+				// it — a consumer that stops at the first Done must not lose it.
 				emit(core.StreamEvent{Type: core.StreamDone, FinishReason: finish})
 				return
 			}
@@ -107,7 +111,7 @@ func (p *OpenAIProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (
 	return events, nil
 }
 
-// emitChunk 将单个增量解码为零或多个事件，返回 false 表示消费端已取消
+// emitChunk decodes a single increment into zero or more events; returning false means the consumer has cancelled.
 func (p *OpenAIProtocol) emitChunk(chunk *streamChunk, emit func(core.StreamEvent) bool) bool {
 	if chunk.Error != nil {
 		return emit(core.StreamEvent{
@@ -143,22 +147,22 @@ func (p *OpenAIProtocol) emitChunk(chunk *streamChunk, emit func(core.StreamEven
 	return true
 }
 
-// streamDecoder 有状态 SSE 解码器
+// streamDecoder is a stateful SSE decoder.
 //
-// SSE 事件可能跨多次 TCP read 到达，tool_calls 分片需要按
-// index 累积，因此解码必须持有 per-request 状态
+// SSE events may arrive across multiple TCP reads, and tool_calls fragments
+// must be accumulated by index, so decoding has to hold per-request state.
 type streamDecoder struct {
 	reader *sseReader
 }
 
-// newStreamDecoder 构造解码器并启用长行缓冲
+// newStreamDecoder constructs the decoder and enables long-line buffering.
 func newStreamDecoder(resp *http.Response) *streamDecoder {
 	return &streamDecoder{reader: newSSEReader(resp, false)}
 }
 
-// next 读取下一个增量
-// ctx: 用于取消时中断阻塞读
-// returns: 解码后的增量；done 为 true 表示流正常结束；err 非 nil 时流已损坏
+// next reads the next increment.
+// ctx: used to interrupt a blocking read on cancellation.
+// returns: the decoded increment; done is true when the stream ended normally; a non-nil err means the stream is broken.
 func (d *streamDecoder) next(ctx context.Context) (*streamChunk, bool, error) {
 	for {
 		data, done, err := d.reader.next(ctx)

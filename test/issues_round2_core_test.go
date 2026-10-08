@@ -10,16 +10,16 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// emptyCleanLLM 返回干净但无内容的流（OpenAI 空补全形态：
-// Start + usage + Done，无任何 delta 事件）
+// emptyCleanLLM returns a clean but contentless stream (the OpenAI empty-completion shape:
+// Start + usage + Done, with no delta events at all)
 type emptyCleanLLM struct{ calls int }
 
-// Chat 未使用
+// Chat is unused
 func (e *emptyCleanLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 产出干净空流
+// ChatStream produces a clean empty stream
 func (e *emptyCleanLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	e.calls++
 	events := make(chan core.StreamEvent, 3)
@@ -30,15 +30,15 @@ func (e *emptyCleanLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-cha
 	return events, nil
 }
 
-// altContentLLM 备用 LLM：返回带文本的正常流并计数
+// altContentLLM is the alternate LLM: returns a normal stream with text and counts calls
 type altContentLLM struct{ calls int }
 
-// Chat 未使用
+// Chat is unused
 func (a *altContentLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 返回 Start+文本+Done 流
+// ChatStream returns a Start+text+Done stream
 func (a *altContentLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	a.calls++
 	events := make(chan core.StreamEvent, 3)
@@ -49,7 +49,7 @@ func (a *altContentLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-cha
 	return events, nil
 }
 
-// consumeAllEvents 全量消费流，返回事件类型序列与 usage 事件用量
+// consumeAllEvents fully consumes the stream, returning the event type sequence and the usage from usage events
 func consumeAllEvents(events <-chan core.StreamEvent) ([]core.StreamEventType, core.Usage) {
 	var types []core.StreamEventType
 	var usage core.Usage
@@ -62,7 +62,7 @@ func consumeAllEvents(events <-chan core.StreamEvent) ([]core.StreamEventType, c
 	return types, usage
 }
 
-// matchEventTypes 逐位比较事件类型序列
+// matchEventTypes compares event type sequences position by position
 func matchEventTypes(got []core.StreamEventType, want ...core.StreamEventType) bool {
 	if len(got) != len(want) {
 		return false
@@ -75,9 +75,9 @@ func matchEventTypes(got []core.StreamEventType, want ...core.StreamEventType) b
 	return true
 }
 
-// TestN2StreamRetryCleanEmptyStreamSucceeds 干净空流（无内容也无
-// StreamError）是成功：不得进入重试，且缓冲事件（含 usage/Done）
-// 必须完整重放给消费者
+// TestN2StreamRetryCleanEmptyStreamSucceeds: a clean empty stream (no content and
+// no StreamError) is a success: it must not enter retry, and the buffered events
+// (including usage/Done) must be replayed to the consumer in full
 func TestN2StreamRetryCleanEmptyStreamSucceeds(t *testing.T) {
 	empty := &emptyCleanLLM{}
 	wrapped := core.StreamRetry(empty, 3)
@@ -98,8 +98,9 @@ func TestN2StreamRetryCleanEmptyStreamSucceeds(t *testing.T) {
 	}
 }
 
-// TestN1FallbackLLMCleanEmptyStreamStaysOnPrimary 主 LLM 的干净空流
-// 是成功：不得切备，消费者拿到主 LLM 的完整事件
+// TestN1FallbackLLMCleanEmptyStreamStaysOnPrimary: a clean empty stream from the
+// primary LLM is a success: it must not switch to the alternate; the consumer
+// receives the primary LLM's full events
 func TestN1FallbackLLMCleanEmptyStreamStaysOnPrimary(t *testing.T) {
 	primary := &emptyCleanLLM{}
 	alternate := &altContentLLM{}
@@ -124,18 +125,18 @@ func TestN1FallbackLLMCleanEmptyStreamStaysOnPrimary(t *testing.T) {
 	}
 }
 
-// slowEmitLLM 向无缓冲通道逐个发送事件，全部发出后关闭通道并经 done 通知
+// slowEmitLLM sends events one by one into an unbuffered channel, closing it after all are sent and notifying via done
 type slowEmitLLM struct {
 	done  chan struct{}
 	total int
 }
 
-// Chat 未使用
+// Chat is unused
 func (s *slowEmitLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 慢速生产：事件数远超中间件转发缓冲，生产者收尾以 done 关闭为号
+// ChatStream produces slowly: the event count far exceeds the middleware's forwarding buffer; the producer finishes, signaled by closing done
 func (s *slowEmitLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	events := make(chan core.StreamEvent)
 	go func() {
@@ -149,13 +150,15 @@ func (s *slowEmitLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan 
 	return events, nil
 }
 
-// TestN3LoggingLLMAbandonedConsumerTerminates 消费者取消 ctx 并停止
-// 读取后，loggingLLM 的转发 goroutine 必须退出并排空源流，上游生产者
-// 才能发完全部事件并关闭通道
+// TestN3LoggingLLMAbandonedConsumerTerminates: after the consumer cancels the ctx
+// and stops reading, the loggingLLM's forwarding goroutine must exit and drain
+// the source stream, so the upstream producer can finish sending all events
+// and close the channel
 //
-// 局限：goroutine 退出无导出信号，这里通过"生产者能收尾（done 关闭）"
-// 间接验证；转发 goroutine 正常退出后 out 会被 close，末尾补一次
-// 全量消费确认无死锁
+// Limitation: there is no exported signal for the goroutine's exit, so this is
+// verified indirectly via "the producer can finish (done closed)"; when the
+// forwarding goroutine exits normally, out gets closed, and a final full
+// consumption pass at the end confirms there is no deadlock
 func TestN3LoggingLLMAbandonedConsumerTerminates(t *testing.T) {
 	source := &slowEmitLLM{done: make(chan struct{}), total: 50}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -169,7 +172,7 @@ func TestN3LoggingLLMAbandonedConsumerTerminates(t *testing.T) {
 	if e := <-events; e.Type != core.StreamStart {
 		t.Fatalf("first event type = %v, want StreamStart", e.Type)
 	}
-	// 模拟消费者放弃：取消后不再读取
+	// Simulate an abandoning consumer: cancel and stop reading
 	cancel()
 
 	select {
@@ -177,7 +180,7 @@ func TestN3LoggingLLMAbandonedConsumerTerminates(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("N3: copy goroutine blocked forever, upstream producer cannot finish")
 	}
-	// 转发 goroutine 退出时 close(out)，range 必须能自然终止
+	// The forwarding goroutine closes out on exit, so range must terminate naturally
 	for range events {
 	}
 }

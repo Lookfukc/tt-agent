@@ -12,7 +12,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/tools/mcp"
 )
 
-// TestMCPHTTPEchoSession Streamable HTTP：JSON 与 SSE 两种响应、会话头续用
+// TestMCPHTTPEchoSession covers Streamable HTTP: both JSON and SSE responses, plus session header reuse.
 func TestMCPHTTPEchoSession(t *testing.T) {
 	var mu sync.Mutex
 	var sessions = map[string]bool{}
@@ -39,7 +39,7 @@ func TestMCPHTTPEchoSession(t *testing.T) {
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			// initialize 分配会话
+			// initialize allocates a session.
 			if req.Method == "initialize" {
 				w.Header().Set("Mcp-Session-Id", "sess-1")
 			}
@@ -56,7 +56,7 @@ func TestMCPHTTPEchoSession(t *testing.T) {
 			sessions["initialized"] = true
 			mu.Unlock()
 		case "tools/list":
-			// 用 SSE 形式回复，验证两种编码都能解
+			// Reply in SSE form to verify both encodings can be decoded.
 			respond(map[string]any{"tools": []any{
 				map[string]any{
 					"name":        "http_echo",
@@ -70,7 +70,7 @@ func TestMCPHTTPEchoSession(t *testing.T) {
 			}}, false)
 		default:
 			if req.ID == 0 {
-				return // 通知：202 即可
+				return // notification: 202 is enough
 			}
 			w.WriteHeader(202)
 		}
@@ -98,7 +98,7 @@ func TestMCPHTTPEchoSession(t *testing.T) {
 		t.Errorf("text = %q", res.Text)
 	}
 
-	// initialize 之后所有请求应带上会话头
+	// All requests after initialize must carry the session header.
 	mu.Lock()
 	header := lastSessionHeader
 	mu.Unlock()
@@ -107,8 +107,9 @@ func TestMCPHTTPEchoSession(t *testing.T) {
 	}
 }
 
-// TestMCPHTTPSSEInitializeSession M-F5 回归：initialize 以 SSE 应答且
-// 经 HTTP 响应头分配会话时，会话必须被捕获并续用到后续请求
+// TestMCPHTTPSSEInitializeSession is an M-F5 regression: when initialize is answered
+// with SSE and the session is allocated via HTTP response headers, the session must be
+// captured and reused on subsequent requests.
 func TestMCPHTTPSSEInitializeSession(t *testing.T) {
 	var mu sync.Mutex
 	var lastSessionHeader string
@@ -126,7 +127,7 @@ func TestMCPHTTPSSEInitializeSession(t *testing.T) {
 
 		switch req.Method {
 		case "initialize":
-			// SSE 编码 + 响应头分配会话：会话捕获必须在编码格式分支之前完成
+			// SSE encoding + session allocated via response header: session capture must happen before the encoding-format branch.
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Mcp-Session-Id", "sse-sess-1")
 			raw, _ := json.Marshal(map[string]any{
@@ -144,7 +145,7 @@ func TestMCPHTTPSSEInitializeSession(t *testing.T) {
 				"result": map[string]any{"tools": []any{}},
 			})
 		default:
-			// 通知（notifications/initialized）：202 即可
+			// notification (notifications/initialized): 202 is enough
 			w.WriteHeader(http.StatusAccepted)
 		}
 	}))
@@ -154,7 +155,7 @@ func TestMCPHTTPSSEInitializeSession(t *testing.T) {
 	if err := client.Connect(t.Context()); err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	// 追加一次调用，其请求头必须带 initialize（SSE 应答）分配的会话
+	// One extra call whose request header must carry the session allocated by initialize (SSE response).
 	if _, err := client.ListTools(t.Context()); err != nil {
 		t.Fatalf("ListTools: %v", err)
 	}

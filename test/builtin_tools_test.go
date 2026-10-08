@@ -43,7 +43,7 @@ func TestCalculator(t *testing.T) {
 
 func TestCalculatorRejectsCode(t *testing.T) {
 	calc := builtin.NewCalculator()
-	// 函数调用、标识符等非算术语法必须被拒
+	// Non-arithmetic syntax such as function calls and identifiers must be rejected.
 	for _, expr := range []string{`fmt.Println(1)`, `x`, `1;2`} {
 		if _, err := calc.Execute(context.Background(), json.RawMessage(`{"expression":"`+expr+`"}`)); err == nil {
 			t.Errorf("expression %q should be rejected", expr)
@@ -54,26 +54,26 @@ func TestCalculatorRejectsCode(t *testing.T) {
 	}
 }
 
-// TestH8HTTPFetchBlocksPrivate 默认拒绝环回/私网目标（SSRF 防护）
+// TestH8HTTPFetchBlocksPrivate verifies that loopback/private-network targets are rejected by default (SSRF protection).
 func TestH8HTTPFetchBlocksPrivate(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "页面内容")
 	}))
 	defer srv.Close()
 
-	// httptest 监听 127.0.0.1，默认策略必须拒绝
+	// httptest listens on 127.0.0.1, which the default policy must reject.
 	fetch := builtin.NewHTTPFetch()
 	if _, err := fetch.Execute(context.Background(),
 		json.RawMessage(`{"url":"`+srv.URL+`"}`)); err == nil {
 		t.Fatal("H8: loopback target must be blocked by default")
 	}
-	// 常见 SSRF 目标：云元数据端点
+	// Common SSRF targets: cloud metadata endpoints.
 	for _, u := range []string{"http://169.254.169.254/latest/meta-data", "http://10.0.0.1/x", "http://[::1]/"} {
 		if _, err := fetch.Execute(context.Background(), json.RawMessage(`{"url":"`+u+`"}`)); err == nil {
 			t.Errorf("H8: %s must be blocked", u)
 		}
 	}
-	// 非 http(s) 协议拒绝
+	// Non-http(s) protocols are rejected.
 	if _, err := fetch.Execute(context.Background(), json.RawMessage(`{"url":"file:///etc/passwd"}`)); err == nil {
 		t.Error("file protocol should be rejected")
 	}
@@ -85,7 +85,7 @@ func TestHTTPFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// 显式放行内网后功能正常
+	// Works normally once private networks are explicitly allowed.
 	fetch := builtin.NewHTTPFetch()
 	fetch.AllowPrivateNetwork = true
 	res, err := fetch.Execute(context.Background(),
@@ -103,7 +103,7 @@ func TestHTTPFetch(t *testing.T) {
 	}
 }
 
-// TestH8HTTPFetchRedirectCheck 重定向逐跳校验：外网 → 内网必须被拦
+// TestH8HTTPFetchRedirectCheck verifies per-hop redirect validation: external → internal must be blocked.
 func TestH8HTTPFetchRedirectCheck(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "内网内容")
@@ -116,8 +116,8 @@ func TestH8HTTPFetchRedirectCheck(t *testing.T) {
 	defer entry.Close()
 
 	fetch := builtin.NewHTTPFetch()
-	fetch.AllowPrivateNetwork = true // 放行入口，验证的是"每跳重新校验"逻辑之外的正常路径
-	// 入口放行但目标也是本机——放行是全局开关，此处验证重定向跟随本身可用
+	fetch.AllowPrivateNetwork = true // Allow the entry point; this verifies the normal path outside the per-hop re-validation logic.
+	// The entry is allowed but the target is also local — the allow flag is global, so this checks that redirect following itself works.
 	res, err := fetch.Execute(context.Background(),
 		json.RawMessage(`{"url":"`+entry.URL+`"}`))
 	if err != nil {

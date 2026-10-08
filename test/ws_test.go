@@ -14,14 +14,14 @@ import (
 	"time"
 )
 
-// wsTestClient 裸 TCP WebSocket 客户端
+// wsTestClient is a raw-TCP WebSocket client
 type wsTestClient struct {
 	conn net.Conn
 	br   *bufio.Reader
 }
 
-// dialWS 手工完成升级握手
-// returns: 就绪的客户端连接
+// dialWS performs the upgrade handshake manually
+// returns: a ready client connection
 func dialWS(t *testing.T, url string) *wsTestClient {
 	t.Helper()
 	addr := strings.TrimPrefix(url, "http://")
@@ -63,7 +63,7 @@ func dialWS(t *testing.T, url string) *wsTestClient {
 			accept = strings.TrimSpace(v)
 		}
 	}
-	// 校验 accept 计算
+	// Verify the accept computation
 	sum := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	want := base64.StdEncoding.EncodeToString(sum[:])
 	if accept != want {
@@ -72,7 +72,7 @@ func dialWS(t *testing.T, url string) *wsTestClient {
 	return &wsTestClient{conn: conn, br: br}
 }
 
-// writeMasked 发送带掩码的客户端帧
+// writeMasked sends a masked client frame
 func (c *wsTestClient) writeMasked(op int, data []byte) {
 	n := len(data)
 	frame := []byte{byte(0x80 | op)}
@@ -97,8 +97,8 @@ func (c *wsTestClient) writeMasked(op int, data []byte) {
 	}
 }
 
-// readMessage 读服务端帧（服务端帧不带掩码）
-// returns: 帧 opcode 与载荷
+// readMessage reads a server frame (server frames are unmasked)
+// returns: the frame opcode and payload
 func (c *wsTestClient) readMessage(t *testing.T) (int, []byte) {
 	t.Helper()
 	var hdr [2]byte
@@ -124,8 +124,8 @@ func (c *wsTestClient) readMessage(t *testing.T) (int, []byte) {
 	return op, payload
 }
 
-// collectEvents 收帧直到 done/error 事件
-// returns: 事件 JSON 列表
+// collectEvents reads frames until a done/error event
+// returns: the list of event JSON objects
 func (c *wsTestClient) collectEvents(t *testing.T) []map[string]any {
 	t.Helper()
 	var events []map[string]any
@@ -173,7 +173,7 @@ func TestWebSocketChat(t *testing.T) {
 		t.Errorf("text = %q", text.String())
 	}
 
-	// 同连接继续第二轮对话
+	// Continue a second round on the same connection
 	req2, _ := json.Marshal(map[string]any{"input": "again"})
 	client.writeMasked(1, req2)
 	events2 := client.collectEvents(t)
@@ -192,7 +192,7 @@ func TestWebSocketPing(t *testing.T) {
 
 	client.writeMasked(9, []byte("ping-data"))
 	op, payload := client.readMessage(t)
-	// 服务器应回 pong 且载荷原样
+	// The server should reply pong with the payload echoed verbatim
 	if op != 0xA {
 		t.Errorf("pong opcode = %#x", op)
 	}

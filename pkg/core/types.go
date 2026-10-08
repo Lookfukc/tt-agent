@@ -1,4 +1,5 @@
-// Package core 提供多平台 LLM Agent 框架的统一类型与核心契约
+// Package core provides the unified types and core contracts for a
+// multi-platform LLM agent framework.
 package core
 
 import (
@@ -6,7 +7,7 @@ import (
 	"strings"
 )
 
-// Role 消息角色
+// Role is the message role.
 type Role string
 
 const (
@@ -16,15 +17,15 @@ const (
 	RoleTool      Role = "tool"
 )
 
-// ToolCall 模型发起的一次工具调用
+// ToolCall is a single tool invocation initiated by the model.
 type ToolCall struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
-	Arguments string `json:"arguments"` // 原始 JSON 字符串，保持各平台原样透传
+	Arguments string `json:"arguments"` // raw JSON string, passed through as-is across platforms
 }
 
-// UnmarshalArguments 将 Arguments 解析为任意 JSON 值
-// returns: 解析后的值，Arguments 为空或非法时返回 nil
+// UnmarshalArguments parses Arguments into an arbitrary JSON value.
+// returns: the parsed value, or nil when Arguments is empty or invalid
 func (t ToolCall) UnmarshalArguments() any {
 	if t.Arguments == "" {
 		return nil
@@ -36,18 +37,20 @@ func (t ToolCall) UnmarshalArguments() any {
 	return v
 }
 
-// ContentPart 多模态内容分片
+// ContentPart is a multimodal content part.
 type ContentPart struct {
-	// Type 分片类型：text 或 image
+	// Type is the part type: text or image.
 	Type string
-	// Text 文本内容，Type 为 text 时有效
+	// Text is the text content, valid when Type is text.
 	Text string
-	// ImageURL 图片地址：http(s) URL 或 data:image/png;base64,xxx 形式的 Data URI
+	// ImageURL is the image address: an http(s) URL or a Data URI of the
+	// form data:image/png;base64,xxx.
 	ImageURL string
 }
 
-// ImageData 解析 Data URI 形式的图片
-// returns: MIME 类型、base64 数据、是否为合法的 base64 Data URI
+// ImageData parses an image in Data URI form.
+// returns: the MIME type, the base64 data, and whether it is a valid
+// base64 Data URI
 func (p ContentPart) ImageData() (mimeType, data string, ok bool) {
 	const prefix = "data:"
 	if !strings.HasPrefix(p.ImageURL, prefix) {
@@ -58,8 +61,9 @@ func (p ContentPart) ImageData() (mimeType, data string, ok bool) {
 	if !found {
 		return "", "", false
 	}
-	// 非 base64 的 Data URI（如 data:text/plain,abc）不是图片载荷，
-	// 误报 ok 会把明文塞进 image 块被 API 拒绝
+	// Data URIs that are not base64 (e.g. data:text/plain,abc) are not image
+	// payloads; falsely reporting ok would stuff plaintext into an image
+	// block and get rejected by the API.
 	if !strings.HasSuffix(meta, ";base64") {
 		return "", "", false
 	}
@@ -70,31 +74,37 @@ func (p ContentPart) ImageData() (mimeType, data string, ok bool) {
 	return mimeType, payload, true
 }
 
-// Message 统一内部消息格式，所有协议适配器负责与其互转
+// Message is the unified internal message format; all protocol adapters are
+// responsible for converting to and from it.
 type Message struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content"`
 
-	// ContentParts 多模态分片，非空时适配器用其替代 Content 构建请求
+	// ContentParts holds multimodal parts; when non-empty, adapters use it
+	// in place of Content to build the request.
 	ContentParts []ContentPart `json:"content_parts,omitempty"`
 
-	// ToolCalls 仅 assistant 消息携带，表示模型请求的工具调用
+	// ToolCalls is carried only by assistant messages, denoting the tool
+	// calls requested by the model.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 
-	// ToolCallID 仅 tool 角色消息携带，标识本次结果回应哪个调用
+	// ToolCallID is carried only by tool-role messages, identifying which
+	// call this result responds to.
 	ToolCallID string `json:"tool_call_id,omitempty"`
 
-	// Reasoning 思维链内容，仅用于展示与记账，回传 API 时丢弃
+	// Reasoning is chain-of-thought content, used only for display and
+	// accounting; it is dropped when sent back to the API.
 	Reasoning string `json:"reasoning,omitempty"`
 
-	// FinishReason 仅流式聚合产物携带，assistant 历史消息回传时忽略
+	// FinishReason is carried only by streaming aggregation results; it is
+	// ignored when assistant history messages are sent back.
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 }
 
-// UserImage 便捷构造带图 user 消息
-// text: 文本说明
-// imageURL: 图片 URL 或 Data URI
-// returns: 组装好的消息
+// UserImage conveniently constructs a user message with an image.
+// text: the text caption
+// imageURL: the image URL or Data URI
+// returns: the assembled message
 func UserImage(text, imageURL string) Message {
 	return Message{
 		Role: RoleUser,
@@ -105,34 +115,34 @@ func UserImage(text, imageURL string) Message {
 	}
 }
 
-// Text 便捷构造 user 消息
+// Text conveniently constructs a user message.
 func Text(content string) Message {
 	return Message{Role: RoleUser, Content: content}
 }
 
-// ToolSpec 暴露给模型的工具定义
+// ToolSpec is a tool definition exposed to the model.
 type ToolSpec struct {
 	Name        string
 	Description string
 	Parameters  json.RawMessage // JSON Schema
 }
 
-// ThinkingConfig 思考模式开关
+// ThinkingConfig is the thinking-mode toggle.
 type ThinkingConfig struct {
 	Enabled bool
-	// BudgetTokens 思考 token 上限，0 表示由模型自定
+	// BudgetTokens is the token ceiling for thinking; 0 lets the model decide.
 	BudgetTokens int64
 }
 
-// ResponseFormat 结构化输出约束
+// ResponseFormat is the structured output constraint.
 type ResponseFormat struct {
-	// Name schema 名称，部分协议要求提供
+	// Name is the schema name, required by some protocols.
 	Name string
-	// Schema JSON Schema 定义
+	// Schema is the JSON Schema definition.
 	Schema json.RawMessage
 }
 
-// ChatRequest 一次对话请求的统一表示
+// ChatRequest is the unified representation of a conversation request.
 type ChatRequest struct {
 	Model       string
 	Messages    []Message
@@ -141,14 +151,16 @@ type ChatRequest struct {
 	MaxTokens   int64
 	Thinking    *ThinkingConfig
 
-	// ResponseFormat 非空时约束模型输出为符合 Schema 的 JSON
+	// ResponseFormat, when non-nil, constrains the model output to JSON
+	// conforming to the Schema.
 	ResponseFormat *ResponseFormat
 
-	// Extra 提供商特有字段的透传通道，由协议适配器合并进请求体
+	// Extra is the passthrough channel for provider-specific fields, merged
+	// into the request body by the protocol adapter.
 	Extra map[string]any
 }
 
-// FinishReason 生成终止原因
+// FinishReason is the reason generation stopped.
 type FinishReason string
 
 const (
@@ -158,27 +170,27 @@ const (
 	FinishContentFilter FinishReason = "content_filter"
 )
 
-// Usage token 用量记账
+// Usage is the token usage accounting.
 type Usage struct {
 	InputTokens     int64
 	OutputTokens    int64
 	ReasoningTokens int64
 }
 
-// Total 总输出 token 含思考部分
-// returns: OutputTokens 与 ReasoningTokens 之和
+// Total returns the total output tokens, including the thinking portion.
+// returns: the sum of OutputTokens and ReasoningTokens
 func (u Usage) Total() int64 {
 	return u.OutputTokens + u.ReasoningTokens
 }
 
-// Add 累加另一份用量
+// Add accumulates another usage record into this one.
 func (u *Usage) Add(other Usage) {
 	u.InputTokens += other.InputTokens
 	u.OutputTokens += other.OutputTokens
 	u.ReasoningTokens += other.ReasoningTokens
 }
 
-// ChatResponse 一次对话的完整响应
+// ChatResponse is the complete response to a conversation.
 type ChatResponse struct {
 	ID           string
 	Model        string
@@ -189,44 +201,46 @@ type ChatResponse struct {
 	Usage        Usage
 }
 
-// StreamEventType 流事件类型
+// StreamEventType is the stream event type.
 type StreamEventType int
 
 const (
-	// StreamStart 流开始，保证是首个事件
+	// StreamStart marks the start of the stream; guaranteed to be the first event.
 	StreamStart StreamEventType = iota
 
-	// StreamDeltaText 文本增量
+	// StreamDeltaText is a text increment.
 	StreamDeltaText
 
-	// StreamDeltaReasoning 思维链增量
+	// StreamDeltaReasoning is a chain-of-thought increment.
 	StreamDeltaReasoning
 
-	// StreamDeltaToolCall 工具调用参数增量，同一次调用按 Index 聚积
+	// StreamDeltaToolCall is a tool-call argument increment; fragments of the
+	// same call are accumulated by Index.
 	StreamDeltaToolCall
 
-	// StreamUsage 部分提供商在流尾附带用量
+	// StreamUsage is usage attached at the end of the stream by some providers.
 	StreamUsage
 
-	// StreamDone 正常终止事件，之后 channel 关闭
+	// StreamDone is the normal termination event; the channel closes after it.
 	StreamDone
 
-	// StreamError 终止性错误事件，之后 channel 关闭
+	// StreamError is the fatal error event; the channel closes after it.
 	StreamError
 )
 
-// ToolCallDelta 工具调用增量的分片
+// ToolCallDelta is a fragment of a tool-call increment.
 type ToolCallDelta struct {
 	Index    int
-	ID       string // 仅首片携带
-	Name     string // 仅首片携带
-	ArgsPart string // Arguments 的追加片段
+	ID       string // carried only by the first fragment
+	Name     string // carried only by the first fragment
+	ArgsPart string // appended fragment of Arguments
 }
 
-// StreamEvent 流式传输事件
+// StreamEvent is a streaming event.
 //
-// channel 语义：生产者负责 close；错误只通过 StreamError 事件传递，不单独开 error channel；
-// ctx 取消时发送 StreamError 后 close
+// Channel semantics: the producer is responsible for closing; errors are
+// delivered only via StreamError events, with no separate error channel; on
+// ctx cancellation a StreamError is sent and then the channel closes.
 type StreamEvent struct {
 	Type          StreamEventType
 	Text          string

@@ -12,12 +12,13 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
 
-// TestRound2N14CalculatorRejectsNonFinite 非有限结果必须显式报错
+// TestRound2N14CalculatorRejectsNonFinite: non-finite results must produce an explicit error
 //
-// 原 bug：溢出得到 Inf/NaN 时静默返回空串，模型拿到空值继续推理
+// Original bug: overflow to Inf/NaN silently returned an empty string, and the
+// model carried on reasoning with an empty value
 func TestRound2N14CalculatorRejectsNonFinite(t *testing.T) {
 	calc := builtin.NewCalculator()
-	// 1e308*10 溢出为 +Inf；Inf-Inf 为 NaN
+	// 1e308*10 overflows to +Inf; Inf-Inf is NaN
 	for _, expr := range []string{"1e308*10", "(1e308*10)-(1e308*10)"} {
 		_, err := calc.Execute(context.Background(), json.RawMessage(`{"expression":"`+expr+`"}`))
 		if err == nil {
@@ -30,15 +31,15 @@ func TestRound2N14CalculatorRejectsNonFinite(t *testing.T) {
 	}
 }
 
-// TestRound2N7RelativeRedirectLocation 无前导斜杠的相对 Location 须按 RFC 3986 解析
+// TestRound2N7RelativeRedirectLocation: a relative Location without a leading slash must be resolved per RFC 3986
 //
-// 原 bug：scheme+"://"+host+location 拼接，"next-page" 会被接到端口后
-// 变成非法 URL
+// Original bug: concatenating scheme+"://"+host+location appended "next-page"
+// right after the port, producing an invalid URL
 func TestRound2N7RelativeRedirectLocation(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/dir/page":
-			w.Header().Set("Location", "next-page") // 无前导 '/'
+			w.Header().Set("Location", "next-page") // no leading '/'
 			w.WriteHeader(http.StatusFound)
 		case "/dir/next-page":
 			fmt.Fprint(w, "相对页内容")
@@ -73,7 +74,7 @@ func TestRound2N7RelativeRedirectLocation(t *testing.T) {
 	}
 }
 
-// TestRound2N7RedirectSchemeRejected 重定向到非 http(s) 协议必须被拒
+// TestRound2N7RedirectSchemeRejected verifies redirects to non-http(s) schemes must be rejected
 func TestRound2N7RedirectSchemeRejected(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/start" {
@@ -96,14 +97,15 @@ func TestRound2N7RedirectSchemeRejected(t *testing.T) {
 	}
 }
 
-// TestRound2H8DialTimePrivateBlock 私网拦截必须发生在拨号之前
+// TestRound2H8DialTimePrivateBlock: the private-network block must happen before dialing
 //
-// 即便目标端口上没有任何监听，错误也应明确说 blocked 而非
-// connection refused / timeout，证明请求从未真正发出
+// Even with nothing listening on the target port, the error should clearly say
+// blocked rather than connection refused / timeout, proving the request was
+// never actually sent
 func TestRound2H8DialTimePrivateBlock(t *testing.T) {
-	fetch := builtin.NewHTTPFetch() // 默认严格
+	fetch := builtin.NewHTTPFetch() // strict by default
 	for _, u := range []string{
-		"http://127.0.0.1:1/", // 环回 + 无监听端口
+		"http://127.0.0.1:1/", // loopback + no listener on the port
 		"http://169.254.169.254/latest/meta-data",
 		"http://10.0.0.1:8080/",
 	} {
@@ -118,9 +120,9 @@ func TestRound2H8DialTimePrivateBlock(t *testing.T) {
 	}
 }
 
-// TestRound2H8AllowPrivateOption 放行选项走自定义拨号路径仍可正常抓取
+// TestRound2H8AllowPrivateOption: with the allow option, fetching still works normally through the custom dial path
 //
-// 新增拨号期校验不能破坏 AllowPrivateNetwork 放行场景的功能
+// The new dial-time check must not break the AllowPrivateNetwork allow scenario
 func TestRound2H8AllowPrivateOption(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "本机内容")
@@ -136,7 +138,7 @@ func TestRound2H8AllowPrivateOption(t *testing.T) {
 	if !strings.Contains(res.Render(), "本机内容") {
 		t.Errorf("H8: content = %s", res.Render())
 	}
-	// 默认构造保持严格：同一 URL 必须被拒
+	// The default constructor stays strict: the same URL must be rejected
 	strict := builtin.NewHTTPFetch()
 	if _, err := strict.Execute(context.Background(),
 		json.RawMessage(`{"url":"`+srv.URL+`"}`)); err == nil {

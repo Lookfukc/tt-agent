@@ -11,7 +11,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// TraceSpan 已结束或进行中的 span 快照
+// TraceSpan is a snapshot of a finished or in-flight span.
 type TraceSpan struct {
 	TraceID    string         `json:"trace_id"`
 	SpanID     string         `json:"span_id"`
@@ -22,8 +22,8 @@ type TraceSpan struct {
 	Attributes map[string]any `json:"attributes,omitempty"`
 }
 
-// Duration 耗时
-// returns: 结束时间减开始时间，未结束时为至今
+// Duration returns the elapsed time.
+// returns: end time minus start time; time until now if not yet ended
 func (s *TraceSpan) Duration() time.Duration {
 	end := s.EndedAt
 	if end.IsZero() {
@@ -32,7 +32,7 @@ func (s *TraceSpan) Duration() time.Duration {
 	return end.Sub(s.StartedAt)
 }
 
-// memorySpan 追踪器侧的 span 实现
+// memorySpan is the tracer-side span implementation.
 type memorySpan struct {
 	tracer *MemoryTracer
 	data   TraceSpan
@@ -40,10 +40,10 @@ type memorySpan struct {
 	ended  bool
 }
 
-// SetAttr 附加属性
+// SetAttr attaches an attribute.
 //
-// End 之后的调用为空操作：span 已交给 Spans() 的读者，
-// 再写入会与遍历构成数据竞态
+// Calls after End are no-ops: the span has already been handed to readers
+// via Spans(), and further writes would be a data race against iteration.
 func (s *memorySpan) SetAttr(key string, value any) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -56,7 +56,7 @@ func (s *memorySpan) SetAttr(key string, value any) {
 	s.data.Attributes[key] = value
 }
 
-// RecordError 记录错误文本
+// RecordError records the error text.
 func (s *memorySpan) RecordError(err error) {
 	if err == nil {
 		return
@@ -64,7 +64,7 @@ func (s *memorySpan) RecordError(err error) {
 	s.SetAttr("error", err.Error())
 }
 
-// End 落账并结束
+// End finalizes and commits the span.
 func (s *memorySpan) End() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,29 +76,33 @@ func (s *memorySpan) End() {
 	s.tracer.append(&s.data)
 }
 
-// defaultMaxSpans 默认 span 保留上限
+// defaultMaxSpans is the default span retention limit.
 const defaultMaxSpans = 10000
 
-// MemoryTracer 进程内内存追踪器，导出 span 树用于测试与调试
+// MemoryTracer is an in-memory tracer that exports the span tree for
+// testing and debugging.
 //
-// span 按结束顺序有上限地保留：长生命周期进程持续追加会吃穿内存，
-// 达到上限后淘汰最旧 span（即最早结束的），需要完整轨迹时改用
-// 落盘的追踪器实现
+// Spans are retained with a cap, in end order: a long-lived process
+// appending indefinitely would eat through memory, so once the cap is
+// reached the oldest span (the earliest ended) is evicted; when a full
+// trace is needed, switch to a disk-backed tracer implementation.
 type MemoryTracer struct {
 	mu    sync.Mutex
 	spans []*TraceSpan
 	limit int
 }
 
-// NewMemoryTracer 构造追踪器，默认保留最近 10000 个 span
-// returns: 可用的追踪器实例
+// NewMemoryTracer constructs a tracer retaining the most recent 10000
+// spans by default.
+// returns: a usable tracer instance
 func NewMemoryTracer() *MemoryTracer {
 	return &MemoryTracer{limit: defaultMaxSpans}
 }
 
-// NewMemoryTracerWithLimit 构造指定 span 保留上限的追踪器
-// n: span 上限，<=0 时退化为默认上限
-// returns: 可用的追踪器实例
+// NewMemoryTracerWithLimit constructs a tracer with a specified span
+// retention limit.
+// n: the span limit; <=0 degrades to the default limit
+// returns: a usable tracer instance
 func NewMemoryTracerWithLimit(n int) *MemoryTracer {
 	if n <= 0 {
 		n = defaultMaxSpans
@@ -106,7 +110,7 @@ func NewMemoryTracerWithLimit(n int) *MemoryTracer {
 	return &MemoryTracer{limit: n}
 }
 
-// StartSpan 实现 core.Tracer
+// StartSpan implements core.Tracer.
 func (t *MemoryTracer) StartSpan(ctx context.Context, name string, attrs ...any) (context.Context, core.Span) {
 	parent := core.SpanFromContext(ctx)
 	data := TraceSpan{
@@ -115,7 +119,8 @@ func (t *MemoryTracer) StartSpan(ctx context.Context, name string, attrs ...any)
 		Name:      name,
 		StartedAt: time.Now(),
 	}
-	// 父 span 是本追踪器产物时继承 TraceID 并建立父子
+	// When the parent span was produced by this tracer, inherit the
+	// TraceID and establish the parent-child link
 	if p, ok := parent.(*memorySpan); ok {
 		data.TraceID = p.data.TraceID
 		data.ParentID = p.data.SpanID
@@ -132,11 +137,12 @@ func (t *MemoryTracer) StartSpan(ctx context.Context, name string, attrs ...any)
 	return core.WithSpan(ctx, span), span
 }
 
-// Spans 导出全部已结束 span 的副本，按结束顺序
+// Spans exports a copy of all finished spans, in end order.
 //
-// Attributes 一并深拷贝：浅拷贝共享 map，读者遍历期间
-// 任何并发写入都是数据竞态
-// returns: span 列表
+// Attributes are deep-copied as well: a shallow copy would share the map,
+// and any concurrent write during a reader's iteration would be a data
+// race.
+// returns: the list of spans
 func (t *MemoryTracer) Spans() []TraceSpan {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -154,8 +160,8 @@ func (t *MemoryTracer) Spans() []TraceSpan {
 	return out
 }
 
-// TraceCount 按 TraceID 计数
-// returns: 独立链路数
+// TraceCount counts by TraceID.
+// returns: the number of distinct traces
 func (t *MemoryTracer) TraceCount() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -166,26 +172,28 @@ func (t *MemoryTracer) TraceCount() int {
 	return len(seen)
 }
 
-// append 追加已结束 span，满容量时淘汰最旧
+// append appends a finished span, evicting the oldest when at capacity.
 func (t *MemoryTracer) append(s *TraceSpan) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if len(t.spans) >= t.limit {
-		// 淘汰最早结束的 span：头部前移后原地追加，
-		// 底层数组容量耗尽时才整体搬迁，摊还 O(1)
+		// Evict the earliest-ended span: after shifting the head off,
+		// append in place; the underlying array is reallocated only when
+		// its capacity is exhausted, amortized O(1)
 		t.spans = append(t.spans[1:], s)
 		return
 	}
 	t.spans = append(t.spans, s)
 }
 
-// newID 生成随机 hex 标识
-// bytes: 字节数
-// returns: hex 字符串
+// newID generates a random hex identifier.
+// bytes: the number of bytes
+// returns: the hex string
 func newID(bytes int) string {
 	buf := make([]byte, bytes)
 	if _, err := rand.Read(buf); err != nil {
-		// 随机源失败退化为时间戳，保证唯一性可用
+		// If the random source fails, degrade to a timestamp so that
+		// uniqueness remains usable
 		return fmt.Sprintf("%x", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)

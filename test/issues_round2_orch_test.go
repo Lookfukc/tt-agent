@@ -8,19 +8,19 @@ import (
 	"time"
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/orchestrator"
 )
 
-// captureRunStore 包装存储并记录 Save 出现过的 runID，
-// 用于在 Run 落盘后立刻拿到 ID 发起并发 Resume
+// captureRunStore wraps a store and records runIDs seen in Save,
+// used to grab the ID right after Run persists so a concurrent Resume can be issued
 type captureRunStore struct {
 	mu    sync.Mutex
 	seen  []string
 	inner orchestrator.RunStore
 }
 
-// Save 记录新 runID 后透传内层
+// Save records the new runID, then passes through to the inner store
 func (c *captureRunStore) Save(run *orchestrator.RunState) error {
 	c.mu.Lock()
 	if len(c.seen) == 0 || c.seen[len(c.seen)-1] != run.ID {
@@ -30,13 +30,13 @@ func (c *captureRunStore) Save(run *orchestrator.RunState) error {
 	return c.inner.Save(run)
 }
 
-// Get 透传内层
+// Get passes through to the inner store
 func (c *captureRunStore) Get(id string) (*orchestrator.RunState, bool) {
 	return c.inner.Get(id)
 }
 
-// firstID 等待首个 runID 出现
-// returns: runID；超时未出现返回 false
+// firstID waits for the first runID to appear
+// returns: the runID; false if it does not appear before the timeout
 func (c *captureRunStore) firstID(timeout time.Duration) (string, bool) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -51,11 +51,12 @@ func (c *captureRunStore) firstID(timeout time.Duration) (string, bool) {
 	return "", false
 }
 
-// TestM_O1RunVsResumeSingleExecution 对在途 Run 的 runID 并发 Resume 只执行一份
+// TestM_O1RunVsResumeSingleExecution: a concurrent Resume on an in-flight Run's runID executes only one copy
 //
-// Run 先落盘（running）再执行慢步骤，窗口期内客户端已能从存储看到
-// runID 并发起 Resume；不取锁的 Run 会与 Resume 并行推进状态机，
-// 双份执行双倍 LLM 花费
+// Run persists first (running) then executes the slow step; during that window
+// a client can already see the runID in the store and issue a Resume; a Run
+// that does not take the lock advances the state machine in parallel with
+// Resume, producing double execution and double LLM cost
 func TestM_O1RunVsResumeSingleExecution(t *testing.T) {
 	store, err := orchestrator.NewFileRunStore(t.TempDir())
 	if err != nil {
@@ -65,7 +66,7 @@ func TestM_O1RunVsResumeSingleExecution(t *testing.T) {
 	o := orchestrator.New(capStore)
 	calls := 0
 	slow := agent.NewLoop(&countingEchoLLM{delay: 200 * time.Millisecond, calls: &calls},
-		nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	o.RegisterAgent("worker", slow)
 	_ = o.RegisterWorkflow(&orchestrator.Workflow{
 		Name:  "w",
@@ -89,7 +90,7 @@ func TestM_O1RunVsResumeSingleExecution(t *testing.T) {
 		resumeDone <- err
 	}()
 
-	// Resume 在 Run 持锁期间必须排队而非并行执行，两侧都不能卡死
+	// Resume must queue rather than run in parallel while Run holds the lock; neither side may deadlock
 	select {
 	case <-runDone:
 	case <-time.After(5 * time.Second):
@@ -105,12 +106,14 @@ func TestM_O1RunVsResumeSingleExecution(t *testing.T) {
 	}
 }
 
-// TestN8RunLocksRefCountCleaned runLocks 表是私有字段无法直接观测容量，
-// 间接验证：锁条目引用计数若只增不减或提前删除，表现为表无限膨胀
-// 或后续加锁错位卡死——大量顺序与并发 Run 必须全部正常完成
+// TestN8RunLocksRefCountCleaned: the runLocks table is a private field so its size
+// cannot be observed directly; verified indirectly: if a lock entry's refcount
+// only ever grows or is deleted too early, the symptom is unbounded table growth
+// or misaligned locking and hangs later — a large number of sequential and
+// concurrent Runs must all complete normally
 func TestN8RunLocksRefCountCleaned(t *testing.T) {
 	o := orchestrator.New(nil)
-	o.RegisterAgent("fast", agent.NewLoop(echoLLM{}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"}))
+	o.RegisterAgent("fast", agent.NewLoop(echoLLM{}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"}))
 	_ = o.RegisterWorkflow(&orchestrator.Workflow{
 		Name:  "w",
 		Steps: []orchestrator.Step{orchestrator.AgentStep{Agent: "fast", Input: "$input"}},
@@ -136,8 +139,9 @@ func TestN8RunLocksRefCountCleaned(t *testing.T) {
 		t.Fatal("N8: sequential Runs hung — runLocks release path broken")
 	}
 
-	// 并发不同 runID 的 Run 摇表锁路径：get-or-create 与删除都在表锁内，
-	// 不允许出现丢条目或死锁
+	// Concurrent Runs with different runIDs shake the table-lock path: both
+	// get-or-create and deletion happen under the table lock; lost entries or
+	// deadlocks are not allowed
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)

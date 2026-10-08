@@ -9,14 +9,14 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// countingLLM 计数并按脚本返回
+// countingLLM counts calls and returns scripted results.
 type countingLLM struct {
 	calls    int
 	resp     string
 	errValue error
 }
 
-// Chat 计数后返回脚本结果
+// Chat counts the call and returns the scripted result.
 func (c *countingLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	c.calls++
 	if c.errValue != nil {
@@ -25,7 +25,7 @@ func (c *countingLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatRes
 	return &core.ChatResponse{Content: c.resp}, nil
 }
 
-// ChatStream 返回单文本事件流
+// ChatStream returns a single-text-event stream.
 func (c *countingLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	c.calls++
 	if c.errValue != nil {
@@ -55,7 +55,7 @@ func TestCacheHits(t *testing.T) {
 		t.Errorf("calls = %d, want 1 (cache miss only)", llm.calls)
 	}
 
-	// 请求变化应失效
+	// A changed request must invalidate the cache.
 	req.Messages[0].Content = "另一个问题"
 	_, _ = p.Chat(context.Background(), req)
 	if llm.calls != 2 {
@@ -87,7 +87,7 @@ func TestFallbackLLMChat(t *testing.T) {
 		t.Fatalf("resp=%v err=%v", resp, err)
 	}
 
-	// 不可重试错误不切备
+	// Non-retryable errors do not fall over to the alternate.
 	primary2 := &countingLLM{errValue: core.NewError(core.ErrInvalidRequest, "p", errors.New("bad"))}
 	alternate2 := &countingLLM{resp: "不应出现"}
 	fb2 := core.FallbackLLM(primary2, alternate2)
@@ -100,7 +100,7 @@ func TestFallbackLLMChat(t *testing.T) {
 }
 
 func TestFallbackLLMStream(t *testing.T) {
-	// 主 LLM 建连即失败（可重试），切备成功
+	// Primary fails at connection setup (retryable); the alternate succeeds.
 	primary := &countingLLM{errValue: core.NewError(core.ErrNetwork, "p", errors.New("unreachable"))}
 	alternate := &countingLLM{resp: "备用流"}
 	fb := core.FallbackLLM(primary, alternate)

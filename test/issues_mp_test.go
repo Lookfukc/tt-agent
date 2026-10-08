@@ -14,7 +14,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// TestM_P1AnthropicThinkingDropsTemperature 思考开启时必须丢弃采样参数
+// TestM_P1AnthropicThinkingDropsTemperature verifies sampling parameters must be dropped when thinking is enabled
 func TestM_P1AnthropicThinkingDropsTemperature(t *testing.T) {
 	got, srv := probeBody(t, `{"content":[{"type":"text","text":"ok"}]}`)
 	defer srv.Close()
@@ -37,7 +37,7 @@ func TestM_P1AnthropicThinkingDropsTemperature(t *testing.T) {
 	}
 }
 
-// TestM_P2AnthropicMergesParallelToolResults 并行工具结果合并进单条 user 消息
+// TestM_P2AnthropicMergesParallelToolResults verifies parallel tool results are merged into a single user message
 func TestM_P2AnthropicMergesParallelToolResults(t *testing.T) {
 	got, srv := probeBody(t, `{"content":[{"type":"text","text":"ok"}]}`)
 	defer srv.Close()
@@ -71,7 +71,7 @@ func TestM_P2AnthropicMergesParallelToolResults(t *testing.T) {
 	}
 }
 
-// TestM_P2GeminiMergesParallelToolResults Gemini 同样合并进单条 user content
+// TestM_P2GeminiMergesParallelToolResults verifies Gemini likewise merges into a single user content
 func TestM_P2GeminiMergesParallelToolResults(t *testing.T) {
 	got, srv := probeBody(t, `{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`)
 	defer srv.Close()
@@ -102,14 +102,14 @@ func TestM_P2GeminiMergesParallelToolResults(t *testing.T) {
 	}
 }
 
-// TestM_P3CancelEmitsStreamError 取消时必须收到 StreamError 而非静默关闭
+// TestM_P3CancelEmitsStreamError verifies cancellation must produce StreamError rather than a silent close
 func TestM_P3CancelEmitsStreamError(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"前半\"}}]}\n\n")
 		w.(http.Flusher).Flush()
-		<-release // 卡住后半段，等客户端取消
+		<-release // Block the second half, waiting for the client to cancel
 	}))
 	defer srv.Close()
 	defer close(release)
@@ -120,7 +120,7 @@ func TestM_P3CancelEmitsStreamError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
-	// 等到首个内容事件后取消
+	// Cancel after the first content event arrives
 	for e := range events {
 		if e.Type == core.StreamDeltaText {
 			break
@@ -152,7 +152,7 @@ collect:
 	}
 }
 
-// TestM_P4SingleDoneEvent OpenAI 流只允许一个 StreamDone 且为终止事件
+// TestM_P4SingleDoneEvent verifies an OpenAI stream allows exactly one StreamDone, as the terminal event
 func TestM_P4SingleDoneEvent(t *testing.T) {
 	srv := serveSSE(t,
 		`data: {"choices":[{"index":0,"delta":{"content":"好"}}]}`,
@@ -187,7 +187,7 @@ func TestM_P4SingleDoneEvent(t *testing.T) {
 	}
 }
 
-// TestM_P6OpenAIReasoningNotDoubleCounted 思考 token 是 completion 子集，不得双计
+// TestM_P6OpenAIReasoningNotDoubleCounted verifies reasoning tokens are a subset of completion tokens and must not be double-counted
 func TestM_P6OpenAIReasoningNotDoubleCounted(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"choices":[{"message":{"content":"答"}}],`+
@@ -209,7 +209,7 @@ func TestM_P6OpenAIReasoningNotDoubleCounted(t *testing.T) {
 	}
 }
 
-// TestM_P7GeminiRejectsExternalImageURL 外链图片明确报错而非映射 fileData
+// TestM_P7GeminiRejectsExternalImageURL verifies external image URLs produce an explicit error instead of being mapped to fileData
 func TestM_P7GeminiRejectsExternalImageURL(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)

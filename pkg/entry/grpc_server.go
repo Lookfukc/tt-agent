@@ -12,21 +12,21 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// AgentServiceServer gRPC 服务端实现接口
+// AgentServiceServer is the gRPC server-side service interface.
 type AgentServiceServer interface {
-	// Chat 一元对话
+	// Chat is the unary conversation method.
 	Chat(ctx context.Context, req *dynamicpb.Message) (*dynamicpb.Message, error)
-	// ChatStream 服务端流对话
+	// ChatStream is the server-streaming conversation method.
 	ChatStream(req *dynamicpb.Message, stream grpc.ServerStream) error
 }
 
-// grpcAgentService 把 entry.Server 适配为 gRPC 服务
+// grpcAgentService adapts entry.Server as a gRPC service.
 type grpcAgentService struct {
 	s *Server
 }
 
-// GRPCRegister 将 AgentService 注册进 gRPC 服务器
-// gs: 目标 gRPC 服务器
+// GRPCRegister registers the AgentService into a gRPC server.
+// gs: the target gRPC server.
 func (s *Server) GRPCRegister(gs *grpc.Server) {
 	gs.RegisterService(&grpc.ServiceDesc{
 		ServiceName: grpcServiceName,
@@ -43,7 +43,7 @@ func (s *Server) GRPCRegister(gs *grpc.Server) {
 	}, &grpcAgentService{s})
 }
 
-// grpcChatHandler 一元方法分发
+// grpcChatHandler dispatches the unary method.
 func (s *Server) grpcChatHandler(srv any, ctx context.Context, dec func(any) error, _ grpc.UnaryServerInterceptor) (any, error) {
 	in := dynamicpb.NewMessage(chatReqDesc)
 	if err := dec(in); err != nil {
@@ -52,7 +52,7 @@ func (s *Server) grpcChatHandler(srv any, ctx context.Context, dec func(any) err
 	return srv.(AgentServiceServer).Chat(ctx, in)
 }
 
-// grpcStreamHandler 流式方法分发
+// grpcStreamHandler dispatches the streaming method.
 func (s *Server) grpcStreamHandler(srv any, stream grpc.ServerStream) error {
 	in := dynamicpb.NewMessage(chatReqDesc)
 	if err := stream.RecvMsg(in); err != nil {
@@ -61,7 +61,7 @@ func (s *Server) grpcStreamHandler(srv any, stream grpc.ServerStream) error {
 	return srv.(AgentServiceServer).ChatStream(in, stream)
 }
 
-// Chat 实现一元对话
+// Chat implements the unary conversation method.
 func (g *grpcAgentService) Chat(ctx context.Context, req *dynamicpb.Message) (*dynamicpb.Message, error) {
 	cfg, model, llm, body, err := g.s.resolveGRPC(req)
 	if err != nil {
@@ -87,7 +87,7 @@ func (g *grpcAgentService) Chat(ctx context.Context, req *dynamicpb.Message) (*d
 	return out, nil
 }
 
-// ChatStream 实现服务端流对话
+// ChatStream implements the server-streaming conversation method.
 func (g *grpcAgentService) ChatStream(req *dynamicpb.Message, stream grpc.ServerStream) error {
 	ctx := stream.Context()
 	cfg, model, llm, body, err := g.s.resolveGRPC(req)
@@ -119,7 +119,8 @@ func (g *grpcAgentService) ChatStream(req *dynamicpb.Message, stream grpc.Server
 		default:
 			return
 		}
-		// 发送失败只记录：ctx 取消后循环自身会退出
+		// Send failures are only recorded: once ctx is canceled,
+		// the loop exits on its own.
 		_ = stream.SendMsg(out)
 	}
 
@@ -140,8 +141,8 @@ func (g *grpcAgentService) ChatStream(req *dynamicpb.Message, stream grpc.Server
 	return stream.SendMsg(out)
 }
 
-// resolveGRPC 从动态请求解析对话参数
-// returns: 提供商配置、模型、LLM、请求体或错误
+// resolveGRPC parses conversation parameters from a dynamic request.
+// returns: the provider config, model, LLM, request body, or an error.
 func (s *Server) resolveGRPC(req *dynamicpb.Message) (*provider.ProviderConfig, string, core.LLM, ChatBody, error) {
 	body := ChatBody{
 		SessionID:    dynStr(req, "session_id"),
@@ -167,8 +168,8 @@ func (s *Server) resolveGRPC(req *dynamicpb.Message) (*provider.ProviderConfig, 
 	return cfg, model, llm, body, nil
 }
 
-// grpcErrorEvent 构造错误响应消息
-// returns: event=error 的动态消息
+// grpcErrorEvent builds an error response message.
+// returns: a dynamic message with event=error.
 func grpcErrorEvent(err error) *dynamicpb.Message {
 	out := dynamicpb.NewMessage(chatRespDesc)
 	setDynStr(out, "event", "error")

@@ -8,24 +8,24 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
 
-// usageScriptedLLM 按轮返回预设消息并附带用量
+// usageScriptedLLM returns a preset message per turn, with attached usage
 type usageScriptedLLM struct {
 	calls int
 	turns []core.Message
 	usage []core.Usage
 }
 
-// Chat 未使用
+// Chat is unused
 func (u *usageScriptedLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 异步返回本轮消息与用量
+// ChatStream asynchronously returns the current turn's message and usage
 func (u *usageScriptedLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	msg := u.turns[min(u.calls, len(u.turns)-1)]
 	usage := u.usage[min(u.calls, len(u.usage)-1)]
@@ -46,9 +46,9 @@ func (u *usageScriptedLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-
 	return events, nil
 }
 
-// TestH1UsageAccumulated Run 返回的累计用量必须非零（原 bug：恒为零）
+// TestH1UsageAccumulated verifies accumulated usage returned by Run must be non-zero (original bug: always zero)
 func TestH1UsageAccumulated(t *testing.T) {
-	// 两轮：第一轮工具调用，第二轮收敛；每轮各带一份用量
+	// Two rounds: round 1 makes a tool call, round 2 converges; each round carries its own usage
 	llm := &usageScriptedLLM{
 		turns: []core.Message{
 			{
@@ -65,7 +65,7 @@ func TestH1UsageAccumulated(t *testing.T) {
 	var doneUsage *core.Usage
 	reg := tools.NewRegistry()
 	reg.Register(&stubTool{})
-	loop := agent.NewLoop(llm, reg, memory.NewBuffer(nil), agent.Config{
+	loop := agent.NewLoop(llm, reg, memorytest.NewBuffer(nil), agent.Config{
 		Model: "m", MaxIterations: 4,
 		OnEvent: func(e agent.LoopEvent) {
 			if e.Type == agent.EventDone && e.Usage != nil {
@@ -85,10 +85,10 @@ func TestH1UsageAccumulated(t *testing.T) {
 	}
 }
 
-// TestH2CalculatorModuloFloatPanic 原 bug：5 % 0.5 触发整型除零 panic
+// TestH2CalculatorModuloFloatPanic: original bug: 5 % 0.5 triggered an integer divide-by-zero panic
 func TestH2CalculatorModuloFloatPanic(t *testing.T) {
 	calc := builtin.NewCalculator()
-	// 修复前：int64(0.5)==0 → panic: integer divide by zero
+	// Before the fix: int64(0.5)==0 → panic: integer divide by zero
 	res, err := calc.Execute(context.Background(), json.RawMessage(`{"expression":"5 % 0.5"}`))
 	if err != nil {
 		t.Fatalf("5 %% 0.5: %v", err)
@@ -100,7 +100,7 @@ func TestH2CalculatorModuloFloatPanic(t *testing.T) {
 	if out.Value != 0 {
 		t.Errorf("5 %% 0.5 = %v, want 0", out.Value)
 	}
-	// 非整数取模不再静默截断
+	// Non-integer modulo is no longer silently truncated
 	res, err = calc.Execute(context.Background(), json.RawMessage(`{"expression":"7.9 % 2.5"}`))
 	if err != nil {
 		t.Fatalf("7.9 %% 2.5: %v", err)
@@ -114,24 +114,24 @@ func TestH2CalculatorModuloFloatPanic(t *testing.T) {
 	}
 }
 
-// panicTool 执行即 panic 的工具
+// panicTool is a tool that panics on execution
 type panicTool struct{}
 
-// Name 工具名
+// Name returns the tool name
 func (panicTool) Name() string { return "bomb" }
 
-// Description 工具描述
+// Description returns the tool description
 func (panicTool) Description() string { return "panic" }
 
-// Parameters 参数 schema
+// Parameters returns the parameter schema
 func (panicTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
-// Execute 直接 panic
+// Execute panics immediately
 func (panicTool) Execute(_ context.Context, _ json.RawMessage) (core.ToolResult, error) {
 	panic("boom")
 }
 
-// TestH2ToolPanicRecovered 工具 panic 不得打崩进程，应转为工具错误回传模型
+// TestH2ToolPanicRecovered verifies a tool panic must not crash the process; it should be converted to a tool error fed back to the model
 func TestH2ToolPanicRecovered(t *testing.T) {
 	llm := &scriptedLLM{turns: []core.Message{
 		{
@@ -142,7 +142,7 @@ func TestH2ToolPanicRecovered(t *testing.T) {
 	}}
 	reg := tools.NewRegistry()
 	reg.Register(panicTool{})
-	mem := memory.NewBuffer(nil)
+	mem := memorytest.NewBuffer(nil)
 	loop := agent.NewLoop(llm, reg, mem, agent.Config{Model: "m", MaxIterations: 3})
 
 	msg, _, err := loop.Run(context.Background(), "h2", "x")
@@ -152,7 +152,7 @@ func TestH2ToolPanicRecovered(t *testing.T) {
 	if !strings.Contains(msg.Content, "活着") {
 		t.Errorf("final = %q", msg.Content)
 	}
-	// panic 应作为 tool error 落历史
+	// The panic should land in history as a tool error
 	history, _ := mem.Recent(context.Background(), "h2", 1_000_000)
 	found := false
 	for _, m := range history {

@@ -5,9 +5,10 @@ import (
 	"sync"
 )
 
-// StreamAccumulator 聚合流事件为完整消息
+// StreamAccumulator aggregates stream events into a complete message.
 //
-// 工具调用分片按 Index 累积参数，消费端无需理解分片协议
+// Tool-call fragments accumulate arguments by Index, so consumers do not
+// need to understand the fragment protocol.
 type StreamAccumulator struct {
 	mu        sync.Mutex
 	text      strings.Builder
@@ -18,13 +19,13 @@ type StreamAccumulator struct {
 	finish    FinishReason
 }
 
-// NewStreamAccumulator 构造聚合器
-// returns: 可用的聚合器实例
+// NewStreamAccumulator constructs an accumulator.
+// returns: a ready-to-use accumulator instance
 func NewStreamAccumulator() *StreamAccumulator {
 	return &StreamAccumulator{toolCalls: make(map[int]*ToolCall)}
 }
 
-// Feed 喂入一个事件
+// Feed ingests one event.
 func (a *StreamAccumulator) Feed(e StreamEvent) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -48,8 +49,9 @@ func (a *StreamAccumulator) Feed(e StreamEvent) {
 		}
 		tc.Arguments += e.ToolCallDelta.ArgsPart
 	case StreamUsage:
-		// 字段级合并而非覆盖：Anthropic 分 message_start/message_delta
-		// 两段各带一半用量，后者缺失的字段保留前值
+		// Field-level merge rather than overwrite: Anthropic splits usage
+		// across message_start/message_delta, each carrying half; fields
+		// missing from the latter keep the earlier values.
 		if e.Usage.InputTokens > a.usage.InputTokens {
 			a.usage.InputTokens = e.Usage.InputTokens
 		}
@@ -66,8 +68,8 @@ func (a *StreamAccumulator) Feed(e StreamEvent) {
 	}
 }
 
-// Message 产出聚合后的 assistant 消息
-// returns: 含 Content/Reasoning/ToolCalls 的消息
+// Message produces the aggregated assistant message.
+// returns: the message with Content/Reasoning/ToolCalls filled in
 func (a *StreamAccumulator) Message() Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -85,17 +87,18 @@ func (a *StreamAccumulator) Message() Message {
 	return msg
 }
 
-// Usage 产出累计用量
-// returns: 最后一次 StreamUsage 事件的用量
+// Usage produces the accumulated usage.
+// returns: the usage from the last StreamUsage event
 func (a *StreamAccumulator) Usage() Usage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.usage
 }
 
-// CollectStream 便捷消费：聚合并返回终止错误
-// events: 实现方负责 close 的事件流
-// returns: 聚合消息、累计用量、终止性错误（StreamError 事件的 Err）
+// CollectStream is a convenience consumer: aggregate and return the terminal error.
+// events: the event stream; the implementation is responsible for closing it
+// returns: the aggregated message, the accumulated usage, and the terminal
+// error (the Err of the StreamError event)
 func CollectStream(events <-chan StreamEvent) (Message, Usage, error) {
 	acc := NewStreamAccumulator()
 	var lastErr error

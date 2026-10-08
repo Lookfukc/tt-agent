@@ -7,40 +7,40 @@ import (
 	"time"
 )
 
-// ErrorKind 错误类别，决定重试策略
+// ErrorKind is the error category, which determines the retry policy.
 type ErrorKind int
 
 const (
-	// ErrInvalidRequest 请求参数错误，重试无意义
+	// ErrInvalidRequest indicates invalid request parameters; retrying is pointless.
 	ErrInvalidRequest ErrorKind = iota
 
-	// ErrAuth 鉴权失败，需换 key 而非重试
+	// ErrAuth indicates an authentication failure; the key must be replaced rather than retried.
 	ErrAuth
 
-	// ErrPermission 配额或权限不足
+	// ErrPermission indicates insufficient quota or permissions.
 	ErrPermission
 
-	// ErrRateLimited 限流，可按 RetryAfter 延迟后重试
+	// ErrRateLimited indicates rate limiting; retry after the RetryAfter delay.
 	ErrRateLimited
 
-	// ErrProviderInternal 提供商服务端错误，可重试
+	// ErrProviderInternal indicates a provider-side server error; retryable.
 	ErrProviderInternal
 
-	// ErrNetwork 网络层错误，可重试
+	// ErrNetwork indicates a network-layer error; retryable.
 	ErrNetwork
 
-	// ErrCanceled 调用方主动取消
+	// ErrCanceled indicates the caller canceled the request.
 	ErrCanceled
 
-	// ErrUnsupported 能力不支持，属配置错误
+	// ErrUnsupported indicates an unsupported capability; a configuration error.
 	ErrUnsupported
 
-	// ErrExhausted 重试次数耗尽
+	// ErrExhausted indicates the retry budget has been exhausted.
 	ErrExhausted
 )
 
-// Retryable 判断错误类别是否可重试
-// returns: true 表示可安全重试同一请求
+// Retryable reports whether the error category is retryable.
+// returns: true if the same request can be safely retried
 func (k ErrorKind) Retryable() bool {
 	switch k {
 	case ErrRateLimited, ErrProviderInternal, ErrNetwork:
@@ -50,17 +50,17 @@ func (k ErrorKind) Retryable() bool {
 	}
 }
 
-// Error 统一错误类型，携带重试决策所需全部信息
+// Error is the unified error type carrying all information needed for retry decisions.
 type Error struct {
 	Kind       ErrorKind
 	ProviderID string
 	StatusCode int
-	// RetryAfter 提供商建议的等待时长，nil 表示未知
+	// RetryAfter is the provider-suggested wait duration; nil means unknown.
 	RetryAfter *time.Duration
 	Err        error
 }
 
-// Error 实现 error 接口
+// Error implements the error interface.
 func (e *Error) Error() string {
 	if e.ProviderID != "" {
 		return fmt.Sprintf("%s: %v", e.ProviderID, e.Err)
@@ -68,20 +68,21 @@ func (e *Error) Error() string {
 	return e.Err.Error()
 }
 
-// Unwrap 支持 errors.Is / errors.As 透传底层错误
+// Unwrap supports errors.Is / errors.As propagation of the underlying error.
 func (e *Error) Unwrap() error {
 	return e.Err
 }
 
-// NewError 构造统一错误
-// providerID: 提供商标识，用于日志与错误信息定位
-// returns: 包装后的 *Error
+// NewError constructs a unified error.
+// providerID: provider identifier, used to locate it in logs and error messages
+// returns: the wrapped *Error
 func NewError(kind ErrorKind, providerID string, err error) *Error {
 	return &Error{Kind: kind, ProviderID: providerID, Err: err}
 }
 
-// ErrorKindOf 提取错误的类别，非 *Error 一律按网络错误处理
-// returns: 错误类别
+// ErrorKindOf extracts the error category; anything that is not a *Error is
+// treated as a network error.
+// returns: the error category
 func ErrorKindOf(err error) ErrorKind {
 	if err == nil {
 		return ErrInvalidRequest
@@ -93,16 +94,18 @@ func ErrorKindOf(err error) ErrorKind {
 	if errors.Is(err, context.Canceled) {
 		return ErrCanceled
 	}
-	// 超时归为取消而非网络错误：预算已耗尽，重试只会再超一次
+	// Timeouts are classified as cancellation rather than network errors:
+	// the budget is already spent, so a retry would just time out again.
 	if errors.Is(err, context.DeadlineExceeded) {
 		return ErrCanceled
 	}
-	// 未分类错误多半来自 net/http 底层，按可重试处理避免误杀
+	// Unclassified errors mostly originate from net/http internals; treat
+	// them as retryable to avoid rejecting requests prematurely.
 	return ErrNetwork
 }
 
-// Retryable 判断错误是否可重试
-// returns: true 表示可安全重试同一请求
+// Retryable reports whether the error is retryable.
+// returns: true if the same request can be safely retried
 func Retryable(err error) bool {
 	if err == nil {
 		return false

@@ -1,4 +1,4 @@
-// Package provider 提供多厂商模型注册与配置管理能力
+// Package provider provides multi-vendor model registration and configuration management.
 package provider
 
 import (
@@ -10,7 +10,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// ModelCapabilities 模型级能力声明
+// ModelCapabilities is a model-level capability declaration.
 type ModelCapabilities struct {
 	Streaming          bool
 	ToolCalls          bool
@@ -18,56 +18,56 @@ type ModelCapabilities struct {
 	Vision             bool
 	StructuredOutput   bool
 	TemperatureSupport bool
-	ContextWindow      int64 // token 数
+	ContextWindow      int64 // number of tokens
 }
 
-// ModelConfig 单个模型的配置与能力
+// ModelConfig is the configuration and capabilities of a single model.
 type ModelConfig struct {
 	ID           string
 	Name         string
 	Capabilities ModelCapabilities
-	// InputPricePerMtok 每百万输入 token 价格，用于成本核算
+	// InputPricePerMtok is the price per million input tokens, used for cost accounting.
 	InputPricePerMtok float64
-	// OutputPricePerMtok 每百万输出 token 价格
+	// OutputPricePerMtok is the price per million output tokens.
 	OutputPricePerMtok float64
 }
 
-// ProviderConfig 提供商配置
+// ProviderConfig is the provider configuration.
 type ProviderConfig struct {
 	ID       string
 	Name     string
 	Protocol string // openai / anthropic / gemini
 	BaseURL  string
-	// APIKeyEnv 密钥环境变量名，密钥不落配置
+	// APIKeyEnv is the name of the API key environment variable; keys are never stored in configuration.
 	APIKeyEnv    string
 	DefaultModel string
 	Models       []ModelConfig
-	// Quirks 协议偏差修正，见 protocol.Quirks
+	// Quirks are protocol deviation corrections; see protocol.Quirks.
 	Quirks protocol.Quirks
 }
 
-// SupportsModel 判断提供商是否含指定模型
-// returns: true 表示支持
+// SupportsModel reports whether the provider includes the specified model.
+// returns: true means supported.
 func (c *ProviderConfig) SupportsModel(model string) bool {
 	_, ok := c.Model(model)
 	return ok
 }
 
-// CostOf 按定价计算一次用量的成本
-// u: token 用量，思考 token 计入输出侧
-// returns: 美元成本，未配置定价时为 0
+// CostOf computes the cost of one usage according to pricing.
+// u: the token usage; thinking tokens count toward the output side.
+// returns: the cost in dollars; 0 when pricing is not configured.
 func (m ModelConfig) CostOf(u core.Usage) float64 {
 	cost := float64(u.InputTokens)/1_000_000*m.InputPricePerMtok +
 		float64(u.OutputTokens+u.ReasoningTokens)/1_000_000*m.OutputPricePerMtok
-	// 半美分以下归零，避免浮点尾噪
+	// Zero out anything below half a cent to avoid floating-point trailing noise.
 	if cost < 0.005 {
 		return 0
 	}
 	return cost
 }
 
-// Model 查找模型配置
-// returns: 模型配置；ok 为 false 表示未注册
+// Model looks up a model configuration.
+// returns: the model configuration; ok is false when not registered.
 func (c *ProviderConfig) Model(model string) (ModelConfig, bool) {
 	for _, m := range c.Models {
 		if m.ID == model {
@@ -77,29 +77,30 @@ func (c *ProviderConfig) Model(model string) (ModelConfig, bool) {
 	return ModelConfig{}, false
 }
 
-// Registry 提供商注册表，并发安全
+// Registry is the provider registry, safe for concurrent use.
 type Registry struct {
 	mu        sync.RWMutex
 	providers map[string]*ProviderConfig
 }
 
-// NewRegistry 构造空注册表
+// NewRegistry constructs an empty registry.
 //
-// 厂商一律由使用方代码注册，框架不内置目录也不拥有配置文件格式
-// returns: 空注册表
+// Vendors are always registered by the calling code; the framework ships no
+// built-in catalog and owns no configuration file format.
+// returns: the empty registry.
 func NewRegistry() *Registry {
 	return &Registry{providers: make(map[string]*ProviderConfig)}
 }
 
-// Register 注册提供商，ID 重复时覆盖
+// Register registers a provider; a duplicate ID overwrites.
 func (r *Registry) Register(c *ProviderConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.providers[c.ID] = c
 }
 
-// Get 按 ID 查找提供商
-// returns: 提供商配置；ok 为 false 表示未注册
+// Get looks up a provider by ID.
+// returns: the provider configuration; ok is false when not registered.
 func (r *Registry) Get(id string) (*ProviderConfig, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -107,8 +108,8 @@ func (r *Registry) Get(id string) (*ProviderConfig, bool) {
 	return c, ok
 }
 
-// MustGet 按 ID 查找提供商，未注册时 panic，仅用于启动期静态装配
-// returns: 提供商配置
+// MustGet looks up a provider by ID and panics when not registered; intended only for startup-time static assembly.
+// returns: the provider configuration.
 func (r *Registry) MustGet(id string) *ProviderConfig {
 	c, ok := r.Get(id)
 	if !ok {
@@ -117,8 +118,8 @@ func (r *Registry) MustGet(id string) *ProviderConfig {
 	return c
 }
 
-// List 列出全部提供商 ID
-// returns: ID 列表
+// List lists all provider IDs.
+// returns: the list of IDs.
 func (r *Registry) List() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -129,26 +130,26 @@ func (r *Registry) List() []string {
 	return ids
 }
 
-// apiKeys 进程级密钥缓存，避免每次请求读环境变量
+// apiKeys is a process-level key cache that avoids reading environment variables on every request.
 var apiKeys sync.Map
 
-// APIKey 读取提供商密钥
-// returns: 密钥值；ok 为 false 表示未通过 SetAPIKey 或环境变量绑定
+// APIKey reads the provider's API key.
+// returns: the key value; ok is false when it was not bound via SetAPIKey or an environment variable.
 func (c *ProviderConfig) APIKey() (string, bool) {
 	if v, ok := apiKeys.Load(c.ID); ok {
 		return v.(string), true
 	}
-	// TODO: 支持从 yaml/密钥管理服务加载
+	// TODO: support loading from yaml / a secret management service
 	return "", false
 }
 
-// SetAPIKey 绑定密钥，进程内生效
+// SetAPIKey binds the key; effective within the process.
 func (c *ProviderConfig) SetAPIKey(key string) {
 	apiKeys.Store(c.ID, key)
 }
 
-// LoadAPIKeyFromEnv 从环境变量加载密钥
-// returns: 加载失败时返回错误
+// LoadAPIKeyFromEnv loads the key from an environment variable.
+// returns: an error when loading fails.
 func (c *ProviderConfig) LoadAPIKeyFromEnv() error {
 	if c.APIKeyEnv == "" {
 		return fmt.Errorf("provider %s has no APIKeyEnv", c.ID)
@@ -161,9 +162,9 @@ func (c *ProviderConfig) LoadAPIKeyFromEnv() error {
 	return nil
 }
 
-// ThinkingCapability 查询模型是否支持思考模式，能力归属模型而非 LLM 接口
-// model: 模型 ID
-// returns: true 表示支持
+// ThinkingCapability queries whether a model supports thinking mode; the capability belongs to the model, not the LLM interface.
+// model: the model ID.
+// returns: true means supported.
 func (c *ProviderConfig) ThinkingCapability(model string) bool {
 	m, ok := c.Model(model)
 	return ok && m.Capabilities.Thinking

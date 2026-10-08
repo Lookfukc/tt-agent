@@ -9,25 +9,26 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// quirkEntry 命名 quirks 条目：补丁函数 + 适用协议
+// quirkEntry is a named quirks entry: a patch function plus the protocols it applies to.
 type quirkEntry struct {
 	patch     protocol.PatchFunc
-	protocols []string // 空表示不限协议
+	protocols []string // empty means unrestricted
 }
 
-// quirksLibrary 命名 quirks 库
+// quirksLibrary is the library of named quirks.
 //
-// 行为修正是代码概念，配置文件按名引用；
-// 新增厂商行为偏差优先评估能否进库复用，而非各写各的
+// Behavior corrections are a code concept that configuration files reference
+// by name; when adding a vendor behavioral deviation, first evaluate whether it
+// can go into the library for reuse rather than writing a one-off each time.
 var quirksLibrary = map[string]quirkEntry{
-	// GLM 用顶层 thinking 字段控制思考模式，标准 OpenAI 协议没有这个字段
+	// GLM controls thinking mode via a top-level thinking field, which the standard OpenAI protocol does not have.
 	"glm-thinking": {patch: glmThinkingPatch, protocols: []string{"openai"}},
-	// reasoner 系模型收到采样参数会直接 400，必须删除
+	// reasoner-series models return an immediate 400 when given sampling parameters; they must be removed.
 	"deepseek-reasoner": {patch: deepSeekReasonerPatch, protocols: []string{"openai"}},
 }
 
-// QuirkNames 列出全部可用 quirks 名
-// returns: 排序后的名字列表
+// QuirkNames lists all available quirk names.
+// returns: the sorted list of names.
 func QuirkNames() []string {
 	names := make([]string, 0, len(quirksLibrary))
 	for n := range quirksLibrary {
@@ -37,10 +38,10 @@ func QuirkNames() []string {
 	return names
 }
 
-// ComposeQuirks 按名组合 quirks
-// names: 配置声明的名字列表，空列表返回零值
-// proto: 提供商协议，用于校验补丁适用性
-// returns: 组合结果，多个补丁按声明顺序依次执行；名字未知或协议不匹配时报错并列出可用名
+// ComposeQuirks composes quirks by name.
+// names: the list of names declared in configuration; an empty list returns the zero value.
+// proto: the provider protocol, used to validate patch applicability.
+// returns: the composed result, with multiple patches executed in declaration order; errors list available names when a name is unknown or the protocol does not match.
 func ComposeQuirks(names []string, proto string) (protocol.Quirks, error) {
 	var q protocol.Quirks
 	var patches []protocol.PatchFunc
@@ -66,7 +67,7 @@ func ComposeQuirks(names []string, proto string) (protocol.Quirks, error) {
 	return q, nil
 }
 
-// contains 切片包含判断
+// contains reports whether the slice contains the string.
 func contains(list []string, s string) bool {
 	for _, v := range list {
 		if v == s {
@@ -76,7 +77,7 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// glmThinkingPatch 将统一 Thinking 配置转译为 GLM 私有字段
+// glmThinkingPatch translates the unified Thinking configuration into GLM's proprietary field.
 func glmThinkingPatch(body map[string]any, req core.ChatRequest) {
 	if req.Thinking == nil {
 		return
@@ -88,7 +89,7 @@ func glmThinkingPatch(body map[string]any, req core.ChatRequest) {
 	}
 }
 
-// deepSeekReasonerPatch 清除 reasoner 模型不接受的采样参数
+// deepSeekReasonerPatch removes the sampling parameters that reasoner models do not accept.
 func deepSeekReasonerPatch(body map[string]any, req core.ChatRequest) {
 	if req.Model != "deepseek-reasoner" {
 		return

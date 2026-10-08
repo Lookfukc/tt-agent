@@ -9,11 +9,11 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/observer"
 )
 
-// captureLLM 记录收到的请求并按脚本回复，可附带用量事件
+// captureLLM records received requests, replies per script, and can attach usage events
 type captureLLM struct {
 	mu    sync.Mutex
 	reqs  []core.ChatRequest
@@ -21,12 +21,12 @@ type captureLLM struct {
 	usage core.Usage
 }
 
-// Chat 未使用，循环统一走流式
+// Chat is unused; the loop always uses streaming
 func (c *captureLLM) Chat(context.Context, core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, errors.New("not implemented")
 }
 
-// ChatStream 记录请求后以事件流返回本轮预设消息
+// ChatStream records the request, then returns the current turn's preset message as an event stream
 func (c *captureLLM) ChatStream(_ context.Context, req core.ChatRequest) (<-chan core.StreamEvent, error) {
 	c.mu.Lock()
 	c.reqs = append(c.reqs, req)
@@ -53,23 +53,23 @@ func (c *captureLLM) ChatStream(_ context.Context, req core.ChatRequest) (<-chan
 	return events, nil
 }
 
-// firstReq 首个记录到的请求
-// returns: 请求副本
+// firstReq returns the first recorded request
+// returns: a copy of the request
 func (c *captureLLM) firstReq() core.ChatRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.reqs[0]
 }
 
-// scriptedMemory 可编程失败的记忆：Add 命中 failRole 时失败，
-// Recent 在 recentErr 非空时失败，其余行为对齐 Buffer
+// scriptedMemory is a programmable failing memory: Add fails when it hits failRole,
+// Recent fails when recentErr is non-nil, and other behavior matches Buffer
 type scriptedMemory struct {
-	inner     *memory.Buffer
+	inner     *memorytest.Buffer
 	failRole  core.Role
 	recentErr error
 }
 
-// Add 命中失败角色即报错，否则透传内层
+// Add errors when it hits the failing role, otherwise passes through to the inner store
 func (s *scriptedMemory) Add(ctx context.Context, sessionID string, msgs ...core.Message) error {
 	for _, m := range msgs {
 		if m.Role == s.failRole {
@@ -79,7 +79,7 @@ func (s *scriptedMemory) Add(ctx context.Context, sessionID string, msgs ...core
 	return s.inner.Add(ctx, sessionID, msgs...)
 }
 
-// Recent 按脚本报错或透传内层
+// Recent errors per script or passes through to the inner store
 func (s *scriptedMemory) Recent(ctx context.Context, sessionID string, budget int64) ([]core.Message, error) {
 	if s.recentErr != nil {
 		return nil, s.recentErr
@@ -87,19 +87,19 @@ func (s *scriptedMemory) Recent(ctx context.Context, sessionID string, budget in
 	return s.inner.Recent(ctx, sessionID, budget)
 }
 
-// Clear 透传内层
+// Clear passes through to the inner store
 func (s *scriptedMemory) Clear(ctx context.Context, sessionID string) error {
 	return s.inner.Clear(ctx, sessionID)
 }
 
-// TestR2H5OutgoingRequestSanitized 悬空 tool_calls 与孤儿 tool 消息只在请求侧修补
+// TestR2H5OutgoingRequestSanitized: dangling tool_calls and orphan tool messages are repaired only on the request side
 //
-// 记忆预置 [assistant(1 个调用无结果), 孤儿 tool, user]，
-// 模型收到的请求必须含该调用的合成结果且不含孤儿；
-// 记忆本身保持真相，不落任何修补产物
+// Memory is preloaded with [assistant(1 call without result), orphan tool, user];
+// the request the model receives must contain a synthesized result for that call
+// and no orphan; the memory itself keeps the truth, persisting no repair artifacts
 func TestR2H5OutgoingRequestSanitized(t *testing.T) {
 	ctx := context.Background()
-	buf := memory.NewBuffer(nil)
+	buf := memorytest.NewBuffer(nil)
 	preload := []core.Message{
 		{Role: core.RoleUser, Content: "旧问题"},
 		{Role: core.RoleAssistant, Content: "", ToolCalls: []core.ToolCall{
@@ -144,9 +144,9 @@ func TestR2H5OutgoingRequestSanitized(t *testing.T) {
 		t.Error("H5: orphan tool result leaked into provider request — API would 400")
 	}
 
-	// 记忆未被污染：预置消息原样保留，无合成结果混入
+	// Memory is not polluted: the preloaded messages remain verbatim, no synthesized results mixed in
 	hist, _ := buf.Recent(ctx, "s1", 100_000)
-	if len(hist) != len(preload)+2 { // +user("继续") +assistant("done")
+	if len(hist) != len(preload)+2 { // +user +assistant("done")
 		t.Fatalf("H5: memory mutated by sanitize, len = %d, want %d", len(hist), len(preload)+2)
 	}
 	for _, m := range hist {
@@ -156,10 +156,10 @@ func TestR2H5OutgoingRequestSanitized(t *testing.T) {
 	}
 }
 
-// TestN9UsageKeptOnToolResultAddFailure 工具结果落盘失败时本轮用量不得丢弃
+// TestN9UsageKeptOnToolResultAddFailure verifies this round's usage must not be dropped when persisting tool results fails
 func TestN9UsageKeptOnToolResultAddFailure(t *testing.T) {
 	ctx := context.Background()
-	mem := &scriptedMemory{inner: memory.NewBuffer(nil), failRole: core.RoleTool}
+	mem := &scriptedMemory{inner: memorytest.NewBuffer(nil), failRole: core.RoleTool}
 	llm := &captureLLM{
 		turns: []core.Message{
 			{Role: core.RoleAssistant, FinishReason: core.FinishToolCalls, ToolCalls: []core.ToolCall{
@@ -179,7 +179,7 @@ func TestN9UsageKeptOnToolResultAddFailure(t *testing.T) {
 	}
 }
 
-// TestN13EventErrorOnMemoryFailures 记忆层三条失败路径都必须发 EventError
+// TestN13EventErrorOnMemoryFailures verifies all three memory-layer failure paths must emit EventError
 func TestN13EventErrorOnMemoryFailures(t *testing.T) {
 	ctx := context.Background()
 	plainTurn := []core.Message{{Role: core.RoleAssistant, Content: "ok"}}
@@ -189,8 +189,8 @@ func TestN13EventErrorOnMemoryFailures(t *testing.T) {
 		}},
 	}
 
-	// runAndCollect 跑一轮并收集 EventError 事件；OnEvent 契约允许
-	// 多 goroutine 回调，收集端按契约加锁
+	// runAndCollect runs one round and collects EventError events; the OnEvent
+	// contract allows multi-goroutine callbacks, so the collector locks per contract
 	runAndCollect := func(mem core.Memory, llm core.LLM) ([]agent.LoopEvent, error) {
 		var mu sync.Mutex
 		var errs []agent.LoopEvent
@@ -211,7 +211,7 @@ func TestN13EventErrorOnMemoryFailures(t *testing.T) {
 	}
 
 	t.Run("RecentFail", func(t *testing.T) {
-		mem := &scriptedMemory{inner: memory.NewBuffer(nil), recentErr: errors.New("recent boom")}
+		mem := &scriptedMemory{inner: memorytest.NewBuffer(nil), recentErr: errors.New("recent boom")}
 		errs, runErr := runAndCollect(mem, &captureLLM{turns: plainTurn})
 		if runErr == nil {
 			t.Fatal("N13: want Run error when Recent fails")
@@ -224,7 +224,7 @@ func TestN13EventErrorOnMemoryFailures(t *testing.T) {
 		}
 	})
 	t.Run("AddAssistantFail", func(t *testing.T) {
-		mem := &scriptedMemory{inner: memory.NewBuffer(nil), failRole: core.RoleAssistant}
+		mem := &scriptedMemory{inner: memorytest.NewBuffer(nil), failRole: core.RoleAssistant}
 		errs, runErr := runAndCollect(mem, &captureLLM{turns: plainTurn})
 		if runErr == nil {
 			t.Fatal("N13: want Run error when Add(assistant) fails")
@@ -234,7 +234,7 @@ func TestN13EventErrorOnMemoryFailures(t *testing.T) {
 		}
 	})
 	t.Run("AddToolFail", func(t *testing.T) {
-		mem := &scriptedMemory{inner: memory.NewBuffer(nil), failRole: core.RoleTool}
+		mem := &scriptedMemory{inner: memorytest.NewBuffer(nil), failRole: core.RoleTool}
 		errs, runErr := runAndCollect(mem, &captureLLM{turns: toolTurn})
 		if runErr == nil {
 			t.Fatal("N13: want Run error when Add(tool) fails")
@@ -245,7 +245,7 @@ func TestN13EventErrorOnMemoryFailures(t *testing.T) {
 	})
 }
 
-// TestL_E7MemoryTracerSpanCap 超过上限后 Spans() 只保留最近有限个 span
+// TestL_E7MemoryTracerSpanCap verifies that past the cap, Spans() keeps only a limited number of recent spans
 func TestL_E7MemoryTracerSpanCap(t *testing.T) {
 	tr := observer.NewMemoryTracerWithLimit(3)
 	for i := 0; i < 10; i++ {
@@ -256,14 +256,14 @@ func TestL_E7MemoryTracerSpanCap(t *testing.T) {
 	if len(spans) != 3 {
 		t.Fatalf("L-E7: spans len = %d, want 3 (capped)", len(spans))
 	}
-	// 淘汰从最旧（最早结束）开始，保留最后 3 个
+	// Eviction starts from the oldest (earliest ended); the last 3 are kept
 	for i, want := range []string{"span-7", "span-8", "span-9"} {
 		if spans[i].Name != want {
 			t.Errorf("L-E7: spans[%d] = %s, want %s (oldest must be evicted)", i, spans[i].Name, want)
 		}
 	}
 
-	// 默认构造器同样有界：超过默认上限后长度封顶
+	// The default constructor is likewise bounded: length caps out past the default limit
 	def := observer.NewMemoryTracer()
 	for i := 0; i < 10005; i++ {
 		_, span := def.StartSpan(context.Background(), "s")

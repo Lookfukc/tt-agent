@@ -8,12 +8,13 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 )
 
-// summaryLLM 记录调用次数的固定摘要 mock
+// summaryLLM is a fixed-summary mock that records call counts
 type summaryLLM struct{ calls atomic.Int32 }
 
-// Chat 返回固定摘要文本
+// Chat returns fixed summary text
 func (s *summaryLLM) Chat(_ context.Context, req core.ChatRequest) (*core.ChatResponse, error) {
 	s.calls.Add(1)
 	if len(req.Messages) < 2 || req.Messages[1].Content == "" {
@@ -22,18 +23,18 @@ func (s *summaryLLM) Chat(_ context.Context, req core.ChatRequest) (*core.ChatRe
 	return &core.ChatResponse{Content: "用户问了数字，助手答了数字"}, nil
 }
 
-// ChatStream 未使用
+// ChatStream is unused
 func (s *summaryLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	return nil, errors.New("not implemented")
 }
 
 func TestSummaryMemory(t *testing.T) {
 	ctx := context.Background()
-	inner := memory.NewBuffer(nil)
+	inner := memorytest.NewBuffer(nil)
 	llm := &summaryLLM{}
 	mem := memory.NewSummary(inner, llm)
 
-	// 系统消息 + 10 条交替对话
+	// System message + 10 alternating conversation messages
 	msgs := []core.Message{{Role: core.RoleSystem, Content: "sys"}}
 	for i := 0; i < 5; i++ {
 		msgs = append(msgs,
@@ -45,7 +46,7 @@ func TestSummaryMemory(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	// 预算只够 4 条时，旧消息应被摘要替代
+	// When the budget only fits 4 messages, old messages should be replaced by a summary
 	got, err := mem.Recent(ctx, "s1", 30)
 	if err != nil {
 		t.Fatalf("Recent: %v", err)
@@ -66,13 +67,13 @@ func TestSummaryMemory(t *testing.T) {
 		t.Errorf("compress calls = %d, want 1", llm.calls.Load())
 	}
 
-	// 同预算再取，命中缓存不重复压缩
+	// Fetching again with the same budget hits the cache without recompressing
 	_, _ = mem.Recent(ctx, "s1", 30)
 	if llm.calls.Load() != 1 {
 		t.Errorf("cache miss, calls = %d", llm.calls.Load())
 	}
 
-	// 内层存储未被污染，仍保留全部消息
+	// The inner store is not polluted and still holds all messages
 	all, _ := inner.Recent(ctx, "s1", 1<<62)
 	if len(all) != len(msgs) {
 		t.Errorf("inner mutated: %d msgs", len(all))
@@ -81,7 +82,7 @@ func TestSummaryMemory(t *testing.T) {
 
 func TestSummaryFallsBackOnLLMFailure(t *testing.T) {
 	ctx := context.Background()
-	inner := memory.NewBuffer(nil)
+	inner := memorytest.NewBuffer(nil)
 	mem := memory.NewSummary(inner, alwaysFailLLM{})
 
 	msgs := make([]core.Message, 0, 10)
@@ -102,15 +103,15 @@ func TestSummaryFallsBackOnLLMFailure(t *testing.T) {
 	}
 }
 
-// alwaysFailLLM 永远失败
+// alwaysFailLLM always fails
 type alwaysFailLLM struct{}
 
-// Chat 返回错误
+// Chat returns an error
 func (alwaysFailLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, errors.New("summarizer down")
 }
 
-// ChatStream 返回错误
+// ChatStream returns an error
 func (alwaysFailLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	return nil, errors.New("summarizer down")
 }

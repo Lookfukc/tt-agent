@@ -9,7 +9,7 @@ import (
 )
 
 func TestComposeQuirks(t *testing.T) {
-	// 空列表返回零值
+	// A nil list returns the zero value.
 	q, err := provider.ComposeQuirks(nil, "openai")
 	if err != nil {
 		t.Fatalf("nil names: %v", err)
@@ -18,7 +18,7 @@ func TestComposeQuirks(t *testing.T) {
 		t.Error("nil names should compose zero quirks")
 	}
 
-	// 单补丁：GLM thinking 私有字段注入
+	// Single patch: GLM thinking private field injection.
 	q, err = provider.ComposeQuirks([]string{"glm-thinking"}, "openai")
 	if err != nil {
 		t.Fatalf("glm-thinking: %v", err)
@@ -30,7 +30,7 @@ func TestComposeQuirks(t *testing.T) {
 		t.Errorf("thinking = %#v", body["thinking"])
 	}
 
-	// 组合：两个补丁按声明顺序都执行
+	// Composition: both patches run in declaration order.
 	q, err = provider.ComposeQuirks([]string{"glm-thinking", "deepseek-reasoner"}, "openai")
 	if err != nil {
 		t.Fatalf("compose: %v", err)
@@ -47,20 +47,20 @@ func TestComposeQuirks(t *testing.T) {
 		t.Error("top_p should be stripped for deepseek-reasoner")
 	}
 
-	// 非 reasoner 模型不受采样参数清理影响
+	// Non-reasoner models are unaffected by sampling-parameter stripping.
 	body = map[string]any{"temperature": 0.7}
 	q.PatchRequest(body, core.ChatRequest{Model: "deepseek-chat"})
 	if _, exists := body["temperature"]; !exists {
 		t.Error("temperature should survive for deepseek-chat")
 	}
 
-	// 未知名报错并列出可用名
+	// An unknown name errors and lists available names.
 	if _, err := provider.ComposeQuirks([]string{"bogus"}, "openai"); err == nil ||
 		!strings.Contains(err.Error(), "glm-thinking") {
 		t.Errorf("unknown quirk error = %v", err)
 	}
 
-	// 协议不匹配报错
+	// A protocol mismatch errors.
 	if _, err := provider.ComposeQuirks([]string{"glm-thinking"}, "anthropic"); err == nil {
 		t.Error("quirk on wrong protocol should fail")
 	}

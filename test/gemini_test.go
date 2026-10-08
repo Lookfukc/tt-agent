@@ -101,13 +101,13 @@ func TestGeminiRequestMapping(t *testing.T) {
 	if fr["name"] != "gemini:echo" && fr["name"] != "echo" {
 		t.Errorf("functionResponse = %v", fr)
 	}
-	// 合成 ID 内嵌函数名，回传时应还原为裸名
+	// The synthesized ID embeds the function name and must be restored to the bare name when sent back.
 	if fr["name"] != "echo" {
 		t.Errorf("name should be extracted from synthesized id, got %q", fr["name"])
 	}
 }
 
-// TestGeminiChatStream 原生流式：连接关闭即结束，无 [DONE] 标记
+// TestGeminiChatStream verifies native streaming: the stream ends when the connection closes, with no [DONE] marker.
 func TestGeminiChatStream(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -118,7 +118,7 @@ func TestGeminiChatStream(t *testing.T) {
 		write(`{"candidates":[{"content":{"parts":[{"thought":true,"text":"想一想"}]}}]}`)
 		write(`{"candidates":[{"content":{"parts":[{"text":"好"},{"functionCall":{"name":"echo","args":{"a":1}}}]}}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":4}}`)
 		write(`{"candidates":[{"content":{"parts":[{}]},"finishReason":"STOP"}]}`)
-		// handler 返回连接即关闭，模拟原生 Gemini 终止方式
+		// The handler returns and the connection closes, mimicking native Gemini termination.
 	}))
 	defer srv.Close()
 
@@ -145,8 +145,8 @@ func TestGeminiChatStream(t *testing.T) {
 	}
 }
 
-// TestH6GeminiParallelToolCallsStream 并行 functionCall 必须各自独立
-// 原 bug：Index 恒为 0，第二个调用覆盖第一个的名字、参数拼成非法 JSON
+// TestH6GeminiParallelToolCallsStream verifies that parallel functionCalls stay independent.
+// Original bug: Index was always 0, so the second call overwrote the first one's name and the arguments concatenated into invalid JSON.
 func TestH6GeminiParallelToolCallsStream(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -179,7 +179,7 @@ func TestH6GeminiParallelToolCallsStream(t *testing.T) {
 }
 
 func TestFactoryProtocols(t *testing.T) {
-	// 三协议合成配置，验证 factory 按协议装配；厂商一律来自配置，注册表不内置
+	// Configs for all three protocols, verifying the factory assembles by protocol; vendors always come from config, the registry has none built in.
 	configs := []provider.ProviderConfig{
 		{ID: "t-openai", Name: "OpenAI 兼容", Protocol: "openai", BaseURL: "http://127.0.0.1:1/v1"},
 		{ID: "t-anthropic", Name: "Anthropic", Protocol: "anthropic", BaseURL: "http://127.0.0.1:1"},
@@ -191,7 +191,7 @@ func TestFactoryProtocols(t *testing.T) {
 			t.Errorf("factory %s: %v", configs[i].ID, err)
 		}
 	}
-	// 空注册表不再内置厂商
+	// An empty registry no longer has built-in providers.
 	if ids := provider.NewRegistry().List(); len(ids) != 0 {
 		t.Errorf("empty registry has providers: %v", ids)
 	}

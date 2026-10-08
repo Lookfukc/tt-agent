@@ -2,18 +2,21 @@ package core
 
 import "context"
 
-// LLM 对话能力抽象，协议适配器实现此接口
+// LLM is the conversation capability abstraction; protocol adapters implement this interface.
 //
-// 能力差异（vision/structured output 等）属于 Model 级信息，
-// 由 provider registry 的 ModelConfig 描述，不放在接口上
+// Capability differences (vision, structured output, etc.) are Model-level
+// information described by the provider registry's ModelConfig, not exposed
+// on the interface.
 type LLM interface {
-	// Chat 发送单次对话请求并等待完整响应
+	// Chat sends a single conversation request and waits for the complete response.
 	Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error)
 
-	// ChatStream 发送流式对话请求
+	// ChatStream sends a streaming conversation request.
 	//
-	// channel 语义：返回的 channel 由实现方 close；错误仅通过 StreamError
-	// 事件传递；ctx 取消时实现方发送 StreamError 后 close。首个事件之前
-	// 发生的错误通过 error 返回值给出，此时尚未创建 channel
+	// Channel semantics: the returned channel is closed by the implementation;
+	// errors are delivered only via StreamError events; on ctx cancellation
+	// the implementation sends StreamError and then closes. Errors occurring
+	// before the first event are reported through the error return value, in
+	// which case no channel has been created.
 	ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error)
 }

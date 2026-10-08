@@ -11,15 +11,16 @@ import (
 	"time"
 )
 
-// LLMMiddleware LLM 级中间件
+// LLMMiddleware is LLM-level middleware.
 //
-// ChatMiddleware 只能覆盖非流式路径，服务端主路径（Agent 循环）
-// 恒为流式；要作用于两条路径的横切逻辑必须挂在这一层
+// ChatMiddleware can only cover the non-streaming path, while the server's
+// main path (the Agent loop) is always streaming; cross-cutting logic that
+// must apply to both paths has to hook in at this layer.
 type LLMMiddleware func(LLM) LLM
 
-// LoggingLLM 双路径日志中间件
-// logger: 日志器，nil 用默认
-// returns: LLM 中间件
+// LoggingLLM is a dual-path logging middleware.
+// logger: the logger; nil selects the default
+// returns: the LLM middleware
 func LoggingLLM(logger *slog.Logger) LLMMiddleware {
 	if logger == nil {
 		logger = slog.Default()
@@ -34,7 +35,7 @@ type loggingLLM struct {
 	logger *slog.Logger
 }
 
-// Chat 记录非流式调用
+// Chat logs non-streaming calls.
 func (l *loggingLLM) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	start := time.Now()
 	resp, err := l.next.Chat(ctx, req)
@@ -52,7 +53,8 @@ func (l *loggingLLM) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, 
 	return resp, nil
 }
 
-// ChatStream 记录流式调用，事件计数与终止状态在流关闭后输出
+// ChatStream logs streaming calls; event counts and the terminal status are
+// emitted after the stream closes.
 func (l *loggingLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
 	start := time.Now()
 	events, err := l.next.ChatStream(ctx, req)
@@ -78,7 +80,8 @@ func (l *loggingLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan St
 			select {
 			case out <- e:
 			case <-ctx.Done():
-				// 消费者已放弃：同步排空源流，让上游生产者能收尾退出
+				// The consumer has given up: synchronously drain the source
+				// stream so the upstream producer can wrap up and exit.
 				drain(events)
 				l.logger.WarnContext(ctx, "llm stream interrupted",
 					"model", req.Model, "events", count,
@@ -101,21 +104,21 @@ func (l *loggingLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan St
 	return out, nil
 }
 
-// tokenBucket 无后台 goroutine 的令牌桶
+// tokenBucket is a token bucket with no background goroutine.
 //
-// 时间驱动按需补充，避免 Ticker 泄漏
+// Refill is time-driven and on demand, avoiding Ticker leaks.
 type tokenBucket struct {
 	mu       sync.Mutex
 	tokens   float64
 	max      float64
-	refillPS float64 // 每秒补充速率
+	refillPS float64 // refill rate per second
 	last     time.Time
 }
 
-// newTokenBucket 构造满桶
-// n: 窗口容量
-// window: 补满耗时
-// returns: 令牌桶
+// newTokenBucket constructs a full bucket.
+// n: the window capacity
+// window: how long it takes to refill to full
+// returns: the token bucket
 func newTokenBucket(n float64, window time.Duration) *tokenBucket {
 	return &tokenBucket{
 		tokens:   n,
@@ -125,8 +128,9 @@ func newTokenBucket(n float64, window time.Duration) *tokenBucket {
 	}
 }
 
-// acquire 取一个令牌，无令牌时等待或随 ctx 取消
-// returns: false 表示 ctx 取消
+// acquire takes one token, waiting when none is available or returning early
+// if ctx is canceled.
+// returns: false if ctx was canceled
 func (b *tokenBucket) acquire(ctx context.Context) bool {
 	for {
 		b.mu.Lock()
@@ -154,12 +158,12 @@ func (b *tokenBucket) acquire(ctx context.Context) bool {
 	}
 }
 
-// RateLimit 固定速率限流中间件（非流式路径）
+// RateLimit is a fixed-rate limiting middleware (non-streaming path).
 //
-// n<=0 或 window<=0 视为不限流，直接透传
-// n: 时间窗内允许的调用数
-// window: 时间窗长度
-// returns: 中间件
+// n<=0 or window<=0 means no limiting; requests pass straight through.
+// n: number of calls allowed within the time window
+// window: length of the time window
+// returns: the middleware
 func RateLimit(n int, window time.Duration) ChatMiddleware {
 	return func(next ChatHandler) ChatHandler {
 		if n <= 0 || window <= 0 {
@@ -175,10 +179,10 @@ func RateLimit(n int, window time.Duration) ChatMiddleware {
 	}
 }
 
-// RateLimitLLM 双路径限流中间件
-// n: 时间窗内允许的调用数；n<=0 不限流
-// window: 时间窗长度
-// returns: LLM 中间件
+// RateLimitLLM is a dual-path rate-limiting middleware.
+// n: number of calls allowed within the time window; n<=0 means no limiting
+// window: length of the time window
+// returns: the LLM middleware
 func RateLimitLLM(n int, window time.Duration) LLMMiddleware {
 	return func(next LLM) LLM {
 		if n <= 0 || window <= 0 {
@@ -194,7 +198,7 @@ type rateLimitedLLM struct {
 	bucket *tokenBucket
 }
 
-// Chat 限流后透传
+// Chat passes through after rate limiting.
 func (r *rateLimitedLLM) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	if !r.bucket.acquire(ctx) {
 		return nil, NewError(ErrCanceled, "", ctx.Err())
@@ -202,7 +206,7 @@ func (r *rateLimitedLLM) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 	return r.next.Chat(ctx, req)
 }
 
-// ChatStream 限流后透传
+// ChatStream passes through after rate limiting.
 func (r *rateLimitedLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
 	if !r.bucket.acquire(ctx) {
 		return nil, NewError(ErrCanceled, "", ctx.Err())
@@ -210,13 +214,14 @@ func (r *rateLimitedLLM) ChatStream(ctx context.Context, req ChatRequest) (<-cha
 	return r.next.ChatStream(ctx, req)
 }
 
-// FallbackLLM 主备切换
+// FallbackLLM provides primary/alternate failover.
 //
-// 非流式：主 LLM 失败即换备；流式：仅首个内容事件前失败才切换，
-// 已产出内容后切换会导致输出重复
-// primary: 主 LLM
-// alternate: 备 LLM
-// returns: 包装后的 LLM
+// Non-streaming: switch to the alternate as soon as the primary fails.
+// Streaming: switch only if the failure happens before the first content
+// event; switching after content has been produced would duplicate the output.
+// primary: the primary LLM
+// alternate: the fallback LLM
+// returns: the wrapped LLM
 func FallbackLLM(primary, alternate LLM) LLM {
 	return &fallbackLLM{primary: primary, alternate: alternate}
 }
@@ -226,7 +231,7 @@ type fallbackLLM struct {
 	alternate LLM
 }
 
-// Chat 主 LLM 失败时用备 LLM 重试
+// Chat retries with the alternate LLM when the primary fails.
 func (f *fallbackLLM) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	resp, err := f.primary.Chat(ctx, req)
 	if err == nil || !Retryable(err) {
@@ -235,7 +240,8 @@ func (f *fallbackLLM) Chat(ctx context.Context, req ChatRequest) (*ChatResponse,
 	return f.alternate.Chat(ctx, req)
 }
 
-// ChatStream 首个内容事件前主 LLM 失败才切备
+// ChatStream switches to the alternate only if the primary fails before the
+// first content event.
 func (f *fallbackLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan StreamEvent, error) {
 	events, err := f.primary.ChatStream(ctx, req)
 	if err != nil {
@@ -250,7 +256,8 @@ func (f *fallbackLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan S
 		if e.Type == StreamError {
 			streamErr = e.Err
 			if !Retryable(e.Err) {
-				// 致命错误透传：先重放缓冲事件再补错误事件，usage 不丢
+				// Fatal errors pass through: replay the buffered events first,
+				// then append the error event so usage is not lost.
 				pending = append(pending, e)
 				return replay(pending), nil
 			}
@@ -262,12 +269,16 @@ func (f *fallbackLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan S
 		}
 	}
 	if streamErr == nil {
-		// 干净收尾的空流（如 OpenAI 空补全：Start+Done 无内容）是
-		// 成功，重放主 LLM 的缓冲事件即可，不得误判失败切备
+		// A stream that ends cleanly while empty (e.g. an OpenAI empty
+		// completion: Start+Done with no content) is a success; replaying the
+		// primary's buffered events is enough — it must not be misjudged as a
+		// failure and switched to the alternate.
 		return relay(ctx, pending, events), nil
 	}
-	// 主 LLM 未产出内容即失败，切备重试；备用建连失败发生在
-	// 首事件前，按契约走 error 返回值而非流内事件
+	// The primary failed without producing content; switch to the alternate
+	// and retry. A failure to establish the alternate connection happens
+	// before the first event, so per the contract it goes through the error
+	// return value rather than an in-stream event.
 	altEvents, err := f.alternate.ChatStream(ctx, req)
 	if err != nil {
 		return nil, err
@@ -275,7 +286,8 @@ func (f *fallbackLLM) ChatStream(ctx context.Context, req ChatRequest) (<-chan S
 	return altEvents, nil
 }
 
-// relay 把已缓冲事件与剩余事件拼接成新流，消费者放弃时排空退出
+// relay concatenates the buffered events with the remaining events into a new
+// stream; if the consumer abandons, drain and exit.
 func relay(ctx context.Context, pending []StreamEvent, rest <-chan StreamEvent) <-chan StreamEvent {
 	out := make(chan StreamEvent, len(pending)+8)
 	go func() {
@@ -300,19 +312,21 @@ func relay(ctx context.Context, pending []StreamEvent, rest <-chan StreamEvent) 
 	return out
 }
 
-// cacheEntry 缓存条目
+// cacheEntry is a cache entry.
 type cacheEntry struct {
 	resp      *ChatResponse
 	expiresAt time.Time
 }
 
-// Cache 响应缓存中间件，仅作用于非流式调用
+// Cache is a response-cache middleware that applies only to non-streaming calls.
 //
-// 带工具的请求可能触发副作用，直接穿透；命中返回深拷贝，
-// 调用方修改响应不得污染缓存
-// ttl: 缓存存活时长，从响应完成时起算
-// maxEntries: 最大条目数，超出后整体清空，避免无界增长
-// returns: 中间件
+// Requests carrying tools may trigger side effects and pass straight through;
+// a hit returns a deep copy so that caller mutations of the response cannot
+// pollute the cache.
+// ttl: how long an entry lives, counted from when the response completes
+// maxEntries: the maximum number of entries; exceeding it clears everything,
+// to avoid unbounded growth
+// returns: the middleware
 func Cache(ttl time.Duration, maxEntries int) ChatMiddleware {
 	var mu sync.Mutex
 	entries := make(map[string]cacheEntry)
@@ -339,9 +353,12 @@ func Cache(ttl time.Duration, maxEntries int) ChatMiddleware {
 			if len(entries) >= maxEntries {
 				entries = make(map[string]cacheEntry)
 			}
-			// 存入与命中都走拷贝：首次调用的返回值与缓存条目
-			// 必须互不干扰，调用方拿到什么改什么都不影响缓存
-			// TTL 从完成时刻起算：慢响应不应提前过期
+			// Both storing and hitting go through copies: the return value of
+			// the first call and the cache entry must not interfere with each
+			// other — whatever the caller receives and however it mutates it,
+			// the cache is unaffected.
+			// TTL is counted from the moment of completion: a slow response
+			// should not expire early.
 			entries[key] = cacheEntry{resp: cloneResponse(resp), expiresAt: time.Now().Add(ttl)}
 			mu.Unlock()
 			return resp, nil
@@ -349,8 +366,9 @@ func Cache(ttl time.Duration, maxEntries int) ChatMiddleware {
 	}
 }
 
-// cloneResponse 深拷贝响应，命中缓存的调用方拿到的必须是私有副本
-// returns: 拷贝
+// cloneResponse deep-copies the response; callers hitting the cache must get
+// a private copy.
+// returns: the copy
 func cloneResponse(resp *ChatResponse) *ChatResponse {
 	if resp == nil {
 		return nil
@@ -363,13 +381,16 @@ func cloneResponse(resp *ChatResponse) *ChatResponse {
 	return &out
 }
 
-// cacheKey 计算请求指纹
+// cacheKey computes the request fingerprint.
 //
-// 覆盖请求的全部语义字段：消息含工具调用与多模态分片，
-// 采样参数含 Thinking 与 ResponseFormat——漏掉任一字段即错误命中
-// Message 的 Reasoning/FinishReason 不参与：同一段对话的多次重试
-// 只有这两个字段可能不同，语义上是同一请求
-// returns: 十六进制哈希；序列化失败时退化为全量展开的哈希，绝不共享空键
+// It covers every semantic field of the request: messages including tool
+// calls and multimodal parts, and sampling parameters including Thinking and
+// ResponseFormat — omitting any one field means a false hit. Message's
+// Reasoning/FinishReason do not participate: across retries of the same
+// conversation only these two fields can differ, and semantically it is the
+// same request.
+// returns: a hex hash; on serialization failure it degrades to a hash of the
+// fully expanded value — an empty shared key is never used
 func cacheKey(req ChatRequest) string {
 	type callKey struct {
 		ID        string
@@ -422,8 +443,9 @@ func cacheKey(req ChatRequest) string {
 	}
 	raw, err := json.Marshal(probe)
 	if err != nil {
-		// 序列化失败（Extra 含不可编码值等）不能共享空键，
-		// 退化为全量展开，保证不同请求不同键
+		// Serialization failure (e.g. Extra containing unencodable values)
+		// must not fall back to a shared empty key; degrade to the fully
+		// expanded value so different requests still get different keys.
 		raw = []byte(fmt.Sprintf("%#v", probe))
 	}
 	sum := sha256.Sum256(raw)

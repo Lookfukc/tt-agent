@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-// wsGUID RFC6455 握手魔数
+// wsGUID is the RFC6455 handshake magic value.
 const wsGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // WS opcodes
@@ -29,25 +29,28 @@ const (
 	wsOpPong         = 0xA
 )
 
-// wsConn 服务端 WebSocket 连接
+// wsConn is a server-side WebSocket connection.
 //
-// 只实现服务端最小集：握手、分帧收发、ping/pong、close；
-// 无压缩无分片扩展，客户端分片消息做透明拼接
+// Only the minimal server-side set is implemented: handshake, framed
+// send/receive, ping/pong, close; no compression or fragmentation
+// extensions; client-fragmented messages are transparently reassembled.
 type wsConn struct {
 	conn net.Conn
 	br   *bufio.Reader
 
-	// 写锁：事件帧（会话循环）、pong/close（读循环）与保活 ping
-	// 来自不同 goroutine 并发写出；net.Conn.Write 本身并发安全，
-	// 但 SetWriteDeadline 与 Write 交错会产生撕裂帧，
-	// 统一在 writeFrame 内持锁串行化
+	// Write lock: event frames (session loop), pong/close (read
+	// loop), and keepalive pings are written concurrently from
+	// different goroutines; net.Conn.Write is itself safe for
+	// concurrent use, but interleaving SetWriteDeadline with Write
+	// can tear frames, so writeFrame serializes them uniformly
+	// under this lock.
 	wmu sync.Mutex
 }
 
-// wsUpgrade 完成 HTTP 升级握手
-// conn: 已劫持的连接
-// key: 请求的 Sec-WebSocket-Key
-// returns: 就绪的 WebSocket 连接
+// wsUpgrade completes the HTTP upgrade handshake.
+// conn: the already-hijacked connection.
+// key: the request's Sec-WebSocket-Key.
+// returns: the ready WebSocket connection.
 func wsUpgrade(conn net.Conn, br *bufio.Reader, key string) (*wsConn, error) {
 	if key == "" {
 		return nil, errors.New("missing Sec-WebSocket-Key")
@@ -64,44 +67,55 @@ func wsUpgrade(conn net.Conn, br *bufio.Reader, key string) (*wsConn, error) {
 	return &wsConn{conn: conn, br: br}, nil
 }
 
-// wsMaxMessage 单条消息累计上限
+// wsMaxMessage is the per-message accumulation cap.
 //
-// 单帧有 16MB 上限，但 FIN=0 的分片可无限累计，
-// 上限必须作用在"已累计总量"上，否则无认证端点可被确定性 OOM
+// A single frame has a 16MB cap, but fragments with FIN=0 can
+// accumulate without bound, so the cap must apply to the "total
+// accumulated so far" — otherwise an unauthenticated endpoint can be
+// deterministically OOMed.
 const wsMaxMessage = 16 << 20
 
-// wsErrMessageTooBig 分片累计超限错误，调用方应回 1009 关闭
+// wsErrMessageTooBig is the fragment-accumulation-over-limit error;
+// callers should reply with a 1009 close.
 var wsErrMessageTooBig = errors.New("websocket message exceeds limit")
 
-// ReadMessage 读下一条完整消息，内部处理 ping/pong 与分片拼接
-// returns: opcode（text/binary）与载荷；连接关闭时返回错误
+// ReadMessage reads the next complete message, handling ping/pong and
+// fragment reassembly internally.
+// returns: the opcode (text/binary) and payload; an error when the
+// connection closes.
 func (ws *wsConn) ReadMessage() (int, []byte, error) {
 	var assembled []byte
 	resultOp := 0
-	// 分片在途标记：控制帧可在分片间穿插，数据帧不容许
+	// In-fragment marker: control frames may interleave between
+	// fragments; data frames may not.
 	inFragment := false
 	for {
 		op, payload, fin, err := ws.readFrame()
 		if err != nil {
 			return 0, nil, err
 		}
-		// RFC6455 §5.5：控制帧不容许分片（必须 FIN=1）且载荷 ≤125 字节
+		// RFC6455 §5.5: control frames must not be fragmented
+		// (FIN must be 1) and payloads are capped at 125 bytes.
 		if op >= wsOpClose && (!fin || len(payload) > 125) {
 			return 0, nil, wsErrProtocol
 		}
 		switch op {
 		case wsOpPing:
-			// 协议要求尽快回 pong，载荷原样带回
+			// The protocol requires replying pong promptly,
+			// echoing the payload back verbatim.
 			if err := ws.writeFrame(wsOpPong, payload); err != nil {
 				return 0, nil, err
 			}
 		case wsOpPong:
-			// 保活 pong：帧到达即在 readFrame 内刷新了读窗口，无需处理
+			// Keepalive pong: the frame's arrival already
+			// refreshed the read window inside readFrame;
+			// nothing more to do.
 		case wsOpClose:
 			_ = ws.writeFrame(wsOpClose, payload)
 			return 0, nil, io.EOF
 		case wsOpContinuation:
-			// 无在途分片却收到 continuation 属协议违规
+			// A continuation frame with no fragment in flight
+			// is a protocol violation.
 			if !inFragment {
 				return 0, nil, wsErrProtocol
 			}
@@ -113,8 +127,10 @@ func (ws *wsConn) ReadMessage() (int, []byte, error) {
 				return resultOp, assembled, nil
 			}
 		default:
-			// 上一条分片消息未收完又来了新的首个数据帧，
-			// 不能静默覆盖已累计内容，按协议违规拒绝
+			// A new first data frame arriving while the
+			// previous fragmented message is unfinished must
+			// not silently overwrite the accumulated content;
+			// reject it as a protocol violation.
 			if inFragment {
 				return 0, nil, wsErrProtocol
 			}
@@ -128,34 +144,39 @@ func (ws *wsConn) ReadMessage() (int, []byte, error) {
 	}
 }
 
-// WriteText 发送文本帧
-// returns: 写失败错误
+// WriteText sends a text frame.
+// returns: any write failure error.
 func (ws *wsConn) WriteText(data []byte) error {
 	return ws.writeFrame(wsOpText, data)
 }
 
-// WriteCloseStatus 发送带状态码的关闭帧
-// code: RFC6455 关闭状态码，如 1009 消息过大
-// returns: 写失败错误
+// WriteCloseStatus sends a close frame carrying a status code.
+// code: an RFC6455 close status code, e.g. 1009 for message too large.
+// returns: any write failure error.
 func (ws *wsConn) WriteCloseStatus(code int) error {
 	payload := []byte{byte(code >> 8), byte(code)}
 	return ws.writeFrame(wsOpClose, payload)
 }
 
-// Close 关闭底层连接
+// Close closes the underlying connection.
 func (ws *wsConn) Close() error { return ws.conn.Close() }
 
-// wsPingInterval 服务端保活 ping 周期
+// wsPingInterval is the server keepalive ping period.
 //
-// 空闲连接按此周期发送空载荷 ping：客户端回 pong（或发出任何帧）
-// 都会在 readFrame 里刷新读窗口，活跃连接不再被 2 分钟窗口误杀；
-// 对已死对端，写失败触发收尾，读窗口兜底回收，不留僵尸连接
+// Idle connections send empty-payload pings on this cadence: a client
+// pong (or any frame it sends) refreshes the read window inside
+// readFrame, so active connections are never killed by the 2-minute
+// window in error; for an already-dead peer, a write failure triggers
+// teardown and the read window reclaims the connection as a fallback,
+// leaving no zombie connections.
 const wsPingInterval = 60 * time.Second
 
-// keepalive 周期发送 ping 保活
+// keepalive sends pings periodically to keep the connection alive.
 //
-// ctx 取消（连接收尾）即退出，杜绝 goroutine 泄漏；写失败说明
-// 对端已不可达，经 onDead 主动取消连接而不是干等读超时
+// It exits as soon as ctx is canceled (connection teardown), so no
+// goroutine leaks; a write failure means the peer is unreachable, so
+// it proactively cancels the connection via onDead instead of idly
+// waiting out the read timeout.
 func (ws *wsConn) keepalive(ctx context.Context, onDead func()) {
 	ticker := time.NewTicker(wsPingInterval)
 	defer ticker.Stop()
@@ -164,8 +185,10 @@ func (ws *wsConn) keepalive(ctx context.Context, onDead func()) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 写锁只在帧写出瞬间持有，ticker 等待期间不阻塞
-			// pong/close 等其它写入路径，无死锁可能
+			// The write lock is held only for the instant the
+			// frame is written; while waiting on the ticker it
+			// does not block other write paths such as
+			// pong/close, so no deadlock is possible.
 			if err := ws.writeFrame(wsOpPing, nil); err != nil {
 				if onDead != nil {
 					onDead()
@@ -176,23 +199,28 @@ func (ws *wsConn) keepalive(ctx context.Context, onDead func()) {
 	}
 }
 
-// wsErrProtocol 协议违规（未掩码帧/非法控制帧/分片错乱），调用方应回 1002 关闭
+// wsErrProtocol signals a protocol violation (unmasked frame / illegal
+// control frame / fragment disorder); callers should reply with a 1002 close.
 var wsErrProtocol = errors.New("websocket protocol violation")
 
-// 帧级超时窗口
+// Frame-level timeout windows.
 //
-// 读窗口按"帧开始"刷新：慢速滴字攻击（帧永不完整）会被窗口掐断，
-// 正常会话只要每帧在窗口内到达即持续续期，不受服务端长任务影响；
-// 空闲客户端对保活 ping 回的 pong 也是帧，同样续期
+// The read window refreshes on "frame start": a slow-drip attack
+// (frames that never complete) gets cut off by the window, while a
+// normal session keeps renewing as long as every frame arrives within
+// the window, unaffected by long-running server tasks; for an idle
+// client, the pong it replies to a keepalive ping is also a frame and
+// likewise renews the window.
 const (
 	wsReadWindow  = 2 * time.Minute
 	wsWriteWindow = 30 * time.Second
 )
 
-// readFrame 读单个帧并解掩码
-// returns: opcode、载荷、是否 FIN
+// readFrame reads a single frame and unmasks it.
+// returns: the opcode, payload, and whether FIN is set.
 func (ws *wsConn) readFrame() (int, []byte, bool, error) {
-	// 每帧刷新读窗口，slowloris 式慢速连接最终被超时掐断
+	// Refresh the read window on every frame; slowloris-style
+	// slow connections are eventually cut off by the timeout.
 	_ = ws.conn.SetReadDeadline(time.Now().Add(wsReadWindow))
 	var hdr [2]byte
 	if _, err := io.ReadFull(ws.br, hdr[:]); err != nil {
@@ -202,7 +230,8 @@ func (ws *wsConn) readFrame() (int, []byte, bool, error) {
 	op := int(hdr[0] & 0x0F)
 	masked := hdr[1]&0x80 != 0
 	if !masked {
-		// RFC6455 §5.1：客户端帧必须掩码，违规以 1002 失败连接
+		// RFC6455 §5.1: client frames must be masked;
+		// violations fail the connection with 1002.
 		return 0, nil, false, wsErrProtocol
 	}
 	length := uint64(hdr[1] & 0x7F)
@@ -220,7 +249,7 @@ func (ws *wsConn) readFrame() (int, []byte, bool, error) {
 		}
 		length = binary.BigEndian.Uint64(ext[:])
 	}
-	// 上限防滥用：单帧 16MB
+	// Anti-abuse cap: 16MB per frame.
 	if length > 16<<20 {
 		return 0, nil, false, errors.New("frame too large")
 	}
@@ -238,15 +267,17 @@ func (ws *wsConn) readFrame() (int, []byte, bool, error) {
 	return op, payload, fin, nil
 }
 
-// writeFrame 写服务端帧（不带掩码）
+// writeFrame writes a server frame (unmasked).
 //
-// 所有帧写出（事件/pong/close/保活 ping）都经此串行化：
-// 并发调用只允许交错在"整帧"粒度上，SetWriteDeadline 与 Write
-// 的交错会撕裂帧
+// All frame writes (events/pong/close/keepalive ping) are serialized
+// through here: concurrent callers may only interleave at "whole
+// frame" granularity — interleaving SetWriteDeadline with Write
+// would tear frames.
 func (ws *wsConn) writeFrame(op int, data []byte) error {
 	ws.wmu.Lock()
 	defer ws.wmu.Unlock()
-	// 写窗口防对端停读导致写阻塞占住连接
+	// The write window prevents a peer that stops reading from
+	// blocking writes and pinning the connection.
 	_ = ws.conn.SetWriteDeadline(time.Now().Add(wsWriteWindow))
 	n := len(data)
 	frame := []byte{byte(0x80 | op)}
@@ -266,7 +297,7 @@ func (ws *wsConn) writeFrame(op int, data []byte) error {
 	return err
 }
 
-// wsWriteJSON 序列化并写文本帧
+// wsWriteJSON serializes and writes a text frame.
 func wsWriteJSON(ws *wsConn, v any) error {
 	payload, err := json.Marshal(v)
 	if err != nil {
@@ -275,8 +306,9 @@ func wsWriteJSON(ws *wsConn, v any) error {
 	return ws.WriteText(payload)
 }
 
-// wsHeaderContains Connection/Upgrade 头的宽松大小写匹配
-// returns: true 表示包含目标 token
+// wsHeaderContains performs lenient case-insensitive matching for the
+// Connection/Upgrade header.
+// returns: true if the target token is present.
 func wsHeaderContains(header, token string) bool {
 	for _, part := range strings.Split(header, ",") {
 		if strings.EqualFold(strings.TrimSpace(part), token) {

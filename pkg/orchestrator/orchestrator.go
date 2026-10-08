@@ -1,4 +1,5 @@
-// Package orchestrator 提供多 Agent 工作流编排与断点续跑能力
+// Package orchestrator provides multi-agent workflow orchestration with
+// resume-from-checkpoint capability.
 package orchestrator
 
 import (
@@ -15,56 +16,63 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// ErrCheckpoint 工作流停在人工检查点，等待 Resume
+// ErrCheckpoint indicates the workflow paused at a manual checkpoint,
+// awaiting Resume.
 var ErrCheckpoint = errors.New("workflow paused at checkpoint")
 
-// Status 运行状态
+// Status is the run status.
 type Status string
 
 const (
 	StatusRunning Status = "running"
-	StatusWaiting Status = "waiting" // 停在检查点
+	StatusWaiting Status = "waiting" // paused at a checkpoint
 	StatusDone    Status = "done"
 	StatusFailed  Status = "failed"
 )
 
-// Step 工作流步骤，封闭的 sum type，只允许 Agent 与检查点两种
+// Step is a workflow step, a closed sum type allowing only agents and
+// checkpoints.
 type Step interface{ stepKind() }
 
-// AgentStep 执行一个已注册 Agent
+// AgentStep executes one registered agent.
 type AgentStep struct {
-	// Name 步骤名，供后续步骤以 $step.<name>.output 引用输出，空则取 Agent 名
+	// Name is the step name, referenced by later steps as
+	// $step.<name>.output; falls back to the agent name when empty.
 	Name string
-	// Agent 已注册的 Agent 名
+	// Agent is the registered agent name.
 	Agent string
-	// Input 输入模板：$input 为工作流初始输入，$prev 为上一步输出，
-	// $step.<name>.output 引用指定步骤输出；非模板字符串原样传入
+	// Input is the input template: $input is the workflow's initial
+	// input, $prev is the previous step's output, and
+	// $step.<name>.output references a given step's output;
+	// non-template strings are passed through verbatim.
 	Input string
 }
 
-// stepKind 实现 Step 接口
+// stepKind implements the Step interface.
 func (AgentStep) stepKind() {}
 
-// CheckpointStep 人工检查点，执行到此暂停并持久化，等待人工 Resume
+// CheckpointStep is a manual checkpoint: execution pauses and persists
+// here, awaiting a human Resume.
 type CheckpointStep struct {
-	// Name 检查点名
+	// Name is the checkpoint name.
 	Name string
-	// Prompt 给审核人的提示说明
+	// Prompt is the explanatory note shown to the reviewer.
 	Prompt string
 }
 
-// stepKind 实现 Step 接口
+// stepKind implements the Step interface.
 func (CheckpointStep) stepKind() {}
 
-// Workflow 顺序工作流
+// Workflow is a sequential workflow.
 //
-// V1 只做线性执行，Router/Supervisor 等分发模式待状态模型稳定后再加
+// V1 does linear execution only; dispatch modes like Router/Supervisor
+// will be added once the state model stabilizes.
 type Workflow struct {
 	Name  string
 	Steps []Step
 }
 
-// RunState 一次工作流运行的持久化状态
+// RunState is the persisted state of one workflow run.
 type RunState struct {
 	ID        string
 	Workflow  string
@@ -79,7 +87,8 @@ type RunState struct {
 	UpdatedAt time.Time
 }
 
-// Orchestrator Agent 与工作流注册中心，Run/Resume 驱动状态机
+// Orchestrator is the registration center for agents and workflows;
+// Run/Resume drive the state machine.
 type Orchestrator struct {
 	mu        sync.RWMutex
 	agents    map[string]*agent.Loop
@@ -87,16 +96,18 @@ type Orchestrator struct {
 	store     RunStore
 	seq       atomic.Int64
 
-	// Tracer 链路追踪，nil 用空实现；产生 workflow.run 与 workflow.step span
+	// Tracer is the trace collector; nil uses the no-op implementation.
+	// It emits workflow.run and workflow.step spans.
 	Tracer core.Tracer
 
 	runMu    sync.Mutex
 	runLocks map[string]*runLock
 }
 
-// New 构造编排器
-// store: 运行状态存储，nil 则不持久化（重启丢状态，仅单次进程内使用）
-// returns: 可用的编排器
+// New constructs an orchestrator.
+// store: the run state store; nil disables persistence (state is lost on
+// restart — only suitable for single-process, single-use runs)
+// returns: a usable orchestrator
 func New(store RunStore) *Orchestrator {
 	return &Orchestrator{
 		agents:    make(map[string]*agent.Loop),
@@ -106,21 +117,26 @@ func New(store RunStore) *Orchestrator {
 	}
 }
 
-// runLock 运行级互斥条目
+// runLock is a per-run mutex entry.
 //
-// refs 引用计数管生命周期：获取与等待都算引用，归零才从表里删除，
-// 否则锁条目随运行数无限累积，长生命周期进程持续泄漏
+// refs is a reference count governing the lifecycle: both acquisition and
+// waiting count as references, and the entry is removed from the table
+// only at zero; otherwise lock entries accumulate without bound as runs
+// pile up, leaking indefinitely in long-lived processes.
 type runLock struct {
 	mu   sync.Mutex
 	refs int
 }
 
-// lockRun 取运行级互斥锁
+// lockRun acquires the per-run mutex.
 //
-// 进程内串行化同 run 的 Run/Resume；跨进程需存储层支持条件写。
-// 等待者在表锁内先 refs++ 再阻塞于 entry.mu，保证持有者释放时
-// 表里仍有条目可锁，不会出现等待者对着已删除条目空等
-// returns: 解锁函数
+// It serializes Run/Resume for the same run within a process; across
+// processes, the storage layer must support conditional writes. Waiters
+// increment refs while holding the table lock before blocking on
+// entry.mu, guaranteeing that when the holder releases there is still an
+// entry in the table to lock — a waiter can never block on a deleted
+// entry.
+// returns: the unlock function
 func (o *Orchestrator) lockRun(runID string) func() {
 	o.runMu.Lock()
 	entry, ok := o.runLocks[runID]
@@ -143,15 +159,15 @@ func (o *Orchestrator) lockRun(runID string) func() {
 	}
 }
 
-// RegisterAgent 注册 Agent 循环
-// name: Agent 唯一名，AgentStep.Agent 引用此名
+// RegisterAgent registers an agent loop.
+// name: the unique agent name; AgentStep.Agent references it
 func (o *Orchestrator) RegisterAgent(name string, loop *agent.Loop) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.agents[name] = loop
 }
 
-// RegisterWorkflow 注册工作流，重名覆盖
+// RegisterWorkflow registers a workflow; duplicate names overwrite.
 func (o *Orchestrator) RegisterWorkflow(wf *Workflow) error {
 	if wf.Name == "" {
 		return fmt.Errorf("workflow name is required")
@@ -162,11 +178,13 @@ func (o *Orchestrator) RegisterWorkflow(wf *Workflow) error {
 	return nil
 }
 
-// Run 启动一次工作流执行
-// ctx: 取消时当前步骤中断，状态留在存储中可 Resume
-// wfName: 工作流名
-// input: 初始输入，步骤模板中的 $input 引用此值
-// returns: 最终或暂停时的运行状态；停在检查点时返回 ErrCheckpoint
+// Run starts one workflow execution.
+// ctx: on cancellation the current step aborts; the state stays in the
+// store and can be Resumed
+// wfName: the workflow name
+// input: the initial input, referenced by $input in step templates
+// returns: the run state at completion or pause; ErrCheckpoint when
+// paused at a checkpoint
 func (o *Orchestrator) Run(ctx context.Context, wfName, input string) (*RunState, error) {
 	ctx, span := o.tracer().StartSpan(ctx, "workflow.run", "workflow", wfName)
 	defer span.End()
@@ -184,24 +202,28 @@ func (o *Orchestrator) Run(ctx context.Context, wfName, input string) (*RunState
 		CreatedAt: time.Now(),
 	}
 	o.save(run)
-	// 与 Resume 共用运行锁：状态先落盘再执行，窗口期内客户端可能
-	// 已拿到 runID 发起 Resume；不锁会双份执行双倍 LLM 花费
+	// Share the run lock with Resume: state hits disk before execution,
+	// and within that window the client may already have the runID and
+	// issue a Resume; without the lock, double execution means double LLM
+	// cost
 	unlock := o.lockRun(run.ID)
 	defer unlock()
 	return o.execute(ctx, run)
 }
 
-// Resume 从检查点或中断处继续执行
+// Resume continues execution from a checkpoint or interruption.
 //
-// waiting：人工检查点，humanInput 作为下一步输入；
-// running：进程崩溃/取消遗留的运行，从当前步骤重跑（至少一次语义）。
-// 完整执行结束只会留下 done/failed，running 必属中断
-// runID: 暂停或中断的运行 ID
-// humanInput: 人工输入，作为检查点输出供下一步 $prev 引用
-// returns: 继续执行后的运行状态
+// waiting: a manual checkpoint, humanInput becomes the next step's input;
+// running: a run left behind by a crash/cancellation, re-run from the
+// current step (at-least-once semantics). A fully completed execution
+// only ever leaves done/failed, so running necessarily means interrupted.
+// runID: the paused or interrupted run ID
+// humanInput: the human input, serving as the checkpoint output for the
+// next step's $prev
+// returns: the run state after continuing execution
 func (o *Orchestrator) Resume(ctx context.Context, runID, humanInput string) (*RunState, error) {
-	// 同 run 并发 Run/Resume 串行化：检查-变更-执行必须原子，
-	// 否则双份执行双倍 LLM 花费
+	// Serialize concurrent Run/Resume on the same run: check-mutate-execute
+	// must be atomic, otherwise double execution means double LLM cost
 	unlock := o.lockRun(runID)
 	defer unlock()
 
@@ -225,13 +247,14 @@ func (o *Orchestrator) Resume(ctx context.Context, runID, humanInput string) (*R
 	return o.execute(ctx, run)
 }
 
-// Get 查询运行状态
-// returns: 运行状态；ok 为 false 表示不存在
+// Get queries the run state.
+// returns: the run state; ok is false if it does not exist
 func (o *Orchestrator) Get(runID string) (*RunState, bool) {
 	return o.store.Get(runID)
 }
 
-// execute 从当前 StepIdx 推进状态机直到完成、失败或检查点
+// execute advances the state machine from the current StepIdx until
+// completion, failure, or a checkpoint.
 func (o *Orchestrator) execute(ctx context.Context, run *RunState) (*RunState, error) {
 	wf, ok := o.workflow(run.Workflow)
 	if !ok {
@@ -262,8 +285,9 @@ func (o *Orchestrator) execute(ctx context.Context, run *RunState) (*RunState, e
 			stepSpan.RecordError(stepErr)
 			stepSpan.End()
 			if ctx.Err() != nil {
-				// 调用方取消不是步骤失败：保持 running（中断态），
-				// 标成 failed 会关死 Resume 的续跑路径
+				// Caller cancellation is not a step failure: keep running
+				// (interrupted state); marking it failed would seal off
+				// Resume's continuation path
 				run.Err = stepErr.Error()
 				o.save(run)
 				return run, stepErr
@@ -275,7 +299,8 @@ func (o *Orchestrator) execute(ctx context.Context, run *RunState) (*RunState, e
 		}
 		stepSpan.End()
 		if paused {
-			// 先落盘再返回，进程崩溃后仍可 Resume
+			// Persist before returning, so the run can still be Resumed
+			// after a process crash
 			run.Status = StatusWaiting
 			run.Err = ""
 			o.save(run)
@@ -288,8 +313,9 @@ func (o *Orchestrator) execute(ctx context.Context, run *RunState) (*RunState, e
 	return run, nil
 }
 
-// tracer 取配置的追踪器，nil 退化为空实现
-// returns: 追踪器
+// tracer returns the configured tracer, degrading to the no-op
+// implementation when nil.
+// returns: the tracer
 func (o *Orchestrator) tracer() core.Tracer {
 	if o.Tracer != nil {
 		return o.Tracer
@@ -297,7 +323,7 @@ func (o *Orchestrator) tracer() core.Tracer {
 	return core.NoopTracer()
 }
 
-// runAgentStep 执行单个 Agent 步骤并记录输出
+// runAgentStep executes a single agent step and records its output.
 func (o *Orchestrator) runAgentStep(ctx context.Context, run *RunState, s AgentStep) error {
 	o.mu.RLock()
 	loop, ok := o.agents[s.Agent]
@@ -321,8 +347,8 @@ func (o *Orchestrator) runAgentStep(ctx context.Context, run *RunState, s AgentS
 	return nil
 }
 
-// stepName 取步骤引用名
-// returns: Name 为空时退回 Agent 名
+// stepName returns the step's reference name.
+// returns: falls back to the agent name when Name is empty
 func stepName(s AgentStep) string {
 	if s.Name != "" {
 		return s.Name
@@ -330,16 +356,18 @@ func stepName(s AgentStep) string {
 	return s.Agent
 }
 
-// sessionID 步骤级会话隔离，同名步骤重跑时追加而非覆盖历史
-// returns: runID 与步骤名拼接的会话 ID
+// sessionID provides per-step session isolation; re-running a same-named
+// step appends to rather than overwrites history.
+// returns: the session ID formed by joining the runID and step name
 func sessionID(runID string, s AgentStep) string {
 	return runID + ":" + stepName(s)
 }
 
-// resolveInput 解析输入模板
+// resolveInput resolves the input template.
 //
-// 只做整串模板匹配：$input / $prev / $step.<name>.output，
-// 不做子串插值，避免引入转义规则
+// Only whole-string template matching is done: $input / $prev /
+// $step.<name>.output — no substring interpolation, to avoid introducing
+// escaping rules.
 func resolveInput(tpl string, run *RunState) string {
 	switch {
 	case tpl == "$input":
@@ -354,10 +382,11 @@ func resolveInput(tpl string, run *RunState) string {
 	}
 }
 
-// save 持久化运行状态
+// save persists the run state.
 //
-// 落盘失败不中断执行，但必须告警：checkpoint 状态丢失意味着
-// 崩溃后无法续跑，静默吞掉会让问题迟到数小时才暴露
+// A persistence failure does not interrupt execution, but must raise an
+// alarm: losing checkpoint state means no continuation after a crash, and
+// silently swallowing it would delay discovery of the problem by hours.
 func (o *Orchestrator) save(run *RunState) {
 	run.UpdatedAt = time.Now()
 	if o.store != nil {
@@ -367,8 +396,8 @@ func (o *Orchestrator) save(run *RunState) {
 	}
 }
 
-// workflow 查找工作流
-// returns: 工作流；ok 为 false 表示未注册
+// workflow looks up a workflow.
+// returns: the workflow; ok is false if not registered
 func (o *Orchestrator) workflow(name string) (*Workflow, bool) {
 	o.mu.RLock()
 	defer o.mu.RUnlock()

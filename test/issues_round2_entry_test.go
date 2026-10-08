@@ -7,9 +7,10 @@ import (
 	"testing"
 )
 
-// writeFragment 发送带掩码、FIN 位可控的客户端帧
+// writeFragment sends a masked client frame with a controllable FIN bit
 //
-// 现有 writeMasked 固定 FIN=1，构造分片与控制帧违规形态需要手工拼首字节
+// The existing writeMasked always sets FIN=1; constructing fragmented messages
+// and control-frame violations requires hand-crafting the first byte
 func (c *wsTestClient) writeFragment(op int, fin bool, data []byte) {
 	n := len(data)
 	first := byte(op)
@@ -38,7 +39,7 @@ func (c *wsTestClient) writeFragment(op int, fin bool, data []byte) {
 	}
 }
 
-// readCloseFrame 断言下一帧是携带指定状态码的关闭帧
+// readCloseFrame asserts the next frame is a close frame carrying the given status code
 func (c *wsTestClient) readCloseFrame(t *testing.T, wantCode int) {
 	t.Helper()
 	op, payload := c.readMessage(t)
@@ -50,7 +51,7 @@ func (c *wsTestClient) readCloseFrame(t *testing.T, wantCode int) {
 	}
 }
 
-// TestRound2WSFragmentAssembled 多段分片消息在累计上限内必须被拼接投递
+// TestRound2WSFragmentAssembled verifies multi-segment fragmented messages within the cumulative cap must be assembled and delivered
 func TestRound2WSFragmentAssembled(t *testing.T) {
 	srv := newTestServer(t, &streamMockLLM{})
 	ts := httptest.NewServer(srv.Handler())
@@ -60,7 +61,7 @@ func TestRound2WSFragmentAssembled(t *testing.T) {
 	defer client.conn.Close()
 
 	req, _ := json.Marshal(map[string]any{"input": "hi", "session_id": "frag-1"})
-	// 首帧 text FIN=0 + 一段中间 continuation + 末段 FIN=1
+	// First text frame FIN=0 + one middle continuation + final segment FIN=1
 	client.writeFragment(1, false, req[:5])
 	client.writeFragment(0, false, req[5:11])
 	client.writeFragment(0, true, req[11:])
@@ -77,7 +78,7 @@ func TestRound2WSFragmentAssembled(t *testing.T) {
 	}
 }
 
-// TestRound2WSFragmentOverCap 分片累计超上限必须以 1009 关闭连接
+// TestRound2WSFragmentOverCap verifies fragments exceeding the cumulative cap must close the connection with 1009
 func TestRound2WSFragmentOverCap(t *testing.T) {
 	srv := newTestServer(t, &streamMockLLM{})
 	ts := httptest.NewServer(srv.Handler())
@@ -86,8 +87,9 @@ func TestRound2WSFragmentOverCap(t *testing.T) {
 	client := dialWS(t, ts.URL)
 	defer client.conn.Close()
 
-	// 8MB + 8MB 恰好压线不触发，再补 1MB 累计 17MB 超过 16MB 上限；
-	// 单帧自身均低于 16MB 帧上限，只应由"累计"路径拒绝
+	// 8MB + 8MB sits exactly at the edge without triggering; adding 1MB more totals
+	// 17MB, exceeding the 16MB cap; each individual frame is itself below the 16MB
+	// frame limit, so only the "cumulative" path should reject
 	chunk := make([]byte, 8<<20)
 	client.writeFragment(1, false, chunk)
 	client.writeFragment(0, false, chunk)
@@ -96,26 +98,26 @@ func TestRound2WSFragmentOverCap(t *testing.T) {
 	client.readCloseFrame(t, 1009)
 }
 
-// TestRound2LE2ControlFrameRules 控制帧与分片协议规则违规必须回 1002
+// TestRound2LE2ControlFrameRules verifies control-frame and fragmentation protocol violations must get 1002
 func TestRound2LE2ControlFrameRules(t *testing.T) {
 	cases := []struct {
 		name string
 		send func(c *wsTestClient)
 	}{
-		// 控制帧不容许 FIN=0（RFC6455 §5.5）
+		// Control frames must not have FIN=0 (RFC6455 §5.5)
 		{"ping-fragmented", func(c *wsTestClient) {
 			c.writeFragment(9, false, []byte("x"))
 		}},
-		// 控制帧载荷不得超过 125 字节
+		// Control frame payload must not exceed 125 bytes
 		{"ping-oversized", func(c *wsTestClient) {
 			c.writeFragment(9, true, make([]byte, 126))
 		}},
-		// 分片在途时来了新的首个数据帧，不得静默覆盖已累计内容
+		// A new first data frame arriving while a fragment is in flight must not silently overwrite the accumulated content
 		{"new-data-during-fragment", func(c *wsTestClient) {
 			c.writeFragment(1, false, []byte(`{"inp`))
 			c.writeFragment(1, true, []byte(`ut":"hi"}`))
 		}},
-		// 无在途分片的孤立 continuation 同样是协议违规
+		// A stray continuation with no fragment in flight is likewise a protocol violation
 		{"stray-continuation", func(c *wsTestClient) {
 			c.writeFragment(0, true, []byte("stray"))
 		}},
@@ -135,12 +137,14 @@ func TestRound2LE2ControlFrameRules(t *testing.T) {
 	}
 }
 
-// TestRound2WSServerPingKeepalive 服务端 60s 保活 ping 无法黑盒观测
+// TestRound2WSServerPingKeepalive: the server's 60s keepalive ping cannot be observed black-box
 //
-// ping 周期是 pkg/entry 包内常量（60s），测试包无注入口；
-// 等待首个 ping 需 ≥60s，超出"不添加 >2s sleep"的测试时限约束。
-// 结构保证：keepalive goroutine 在 connCtx 取消时退出（无泄漏），
-// ping 帧经 writeFrame 持写锁写出，与 pong/close/事件帧串行化。
+// The ping period is a constant inside the pkg/entry package (60s), and the test
+// package has no injection point; waiting for the first ping would take ≥60s,
+// exceeding the test-time constraint of "no >2s sleeps".
+// Structural guarantees: the keepalive goroutine exits when connCtx is cancelled
+// (no leak); ping frames are written through writeFrame while holding the write
+// lock, serialized with pong/close/event frames.
 func TestRound2WSServerPingKeepalive(t *testing.T) {
 	t.Skip("60s ping 周期无法在测试时限内观测，黑盒无短周期注入口")
 }

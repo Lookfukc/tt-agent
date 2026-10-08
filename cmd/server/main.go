@@ -1,4 +1,4 @@
-// Package main 启动 Agent 框架 HTTP 服务
+// Package main starts the Agent framework HTTP server.
 package main
 
 import (
@@ -18,6 +18,7 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
 	"github.com/Lookfukc/tt-agent/pkg/entry"
+	"github.com/Lookfukc/tt-agent/pkg/memory"
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
@@ -33,9 +34,12 @@ func main() {
 	prompt := flag.String("prompt", "", "default system prompt")
 	enableFetch := flag.Bool("enable-httpfetch", false, "register http_fetch tool (SSRF surface, off by default)")
 	allowPrivate := flag.Bool("httpfetch-allow-private", false, "allow http_fetch to reach private networks")
+	memDir := flag.String("memory-dir", "", "session memory dir (default: shared temp dir, restart-safe on same machine)")
+	memMaxLoaded := flag.Int("memory-max-loaded", 1024, "max sessions resident in memory (LRU evict beyond)")
 	flag.Parse()
 
-	// 厂商配置即 flag+env，多厂商场景写自己的 main 用注册表装配
+	// Vendor configuration is just flags+env; for multi-vendor setups
+	// write your own main and assemble via the registry.
 	if *baseURL == "" || *apiKeyEnv == "" || *defaultModel == "" {
 		log.Fatalf("--base-url, --api-key-env and --model are required")
 	}
@@ -54,7 +58,8 @@ func main() {
 		BaseURL: *baseURL, APIKeyEnv: *apiKeyEnv, DefaultModel: *defaultModel,
 		Models: []provider.ModelConfig{{ID: *defaultModel}},
 	})
-	// 单厂商服务缺密钥必坏，装配期即报
+	// A single-vendor server is definitely broken without the key;
+	// report it at assembly time.
 	if err := registry.MustGet(*defaultProvider).LoadAPIKeyFromEnv(); err != nil {
 		log.Fatalf("%v", err)
 	}
@@ -62,21 +67,40 @@ func main() {
 	toolReg := tools.NewRegistry()
 	toolReg.Register(builtin.NewCalculator())
 	toolReg.Register(builtin.NewClock())
-	// http_fetch 面向模型输出属 SSRF 面，默认不注册，显式开启且放行内网需双开关
+	// http_fetch exposes an SSRF surface via model output; it is not
+	// registered by default — enabling it and allowing private
+	// networks requires the two separate switches.
 	if *enableFetch {
 		fetch := builtin.NewHTTPFetch()
 		fetch.AllowPrivateNetwork = *allowPrivate
 		toolReg.Register(fetch)
 	}
 
+	// Session memory: an explicit directory wins; without one, persist
+	// to a temp dir (recoverable across restarts on the same machine)
+	// rather than falling back to process memory. For multi-instance
+	// deployments, configure a dedicated dir per instance or swap in an
+	// external storage implementation.
+	memOpts := []entry.Option{}
+	if *memDir != "" {
+		mem, err := memory.NewPersistentWithLRU(*memDir, nil, *memMaxLoaded)
+		if err != nil {
+			log.Fatalf("init memory dir: %v", err)
+		}
+		memOpts = append(memOpts, entry.WithMemory(mem))
+		log.Printf("session memory dir: %s (max loaded %d)", *memDir, *memMaxLoaded)
+	} else {
+		log.Printf("session memory dir: %s (default temp dir)", entry.DefaultMemoryDir())
+	}
+
 	srv := entry.NewServer(registry, toolReg,
-		entry.WithConfig(entry.Config{
+		append(memOpts, entry.WithConfig(entry.Config{
 			Addr:            *addr,
 			DefaultProvider: *defaultProvider,
 			SystemPrompt:    *prompt,
 			MaxIterations:   16,
 			TokenBudget:     32_000,
-		}),
+		}))...,
 	)
 
 	httpSrv := &http.Server{
@@ -106,7 +130,8 @@ func main() {
 		}()
 	}
 
-	// 退出信号给在途流式响应 10s 排空窗口
+	// On exit signals, give in-flight streaming responses a 10s
+	// drain window.
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -116,10 +141,12 @@ func main() {
 	if err := httpSrv.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}
-	// 劫持的 WS 连接不在 Shutdown 管辖内，进程退出前显式关闭
+	// Hijacked WS connections are outside Shutdown's purview; close
+	// them explicitly before process exit.
 	srv.CloseWebSockets()
 	if gs != nil {
-		// GracefulStop 排空在途流；窗口内未完成则 Stop 强断
+		// GracefulStop drains in-flight streams; if not done within
+		// the window, Stop cuts them off hard.
 		stopped := make(chan struct{})
 		go func() {
 			gs.GracefulStop()

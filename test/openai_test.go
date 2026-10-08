@@ -1,4 +1,4 @@
-// Package test 以黑盒方式集中验证框架各层行为，仅依赖导出 API
+// Package test verifies framework behavior across layers as a black box, depending only on exported APIs.
 package test
 
 import (
@@ -16,7 +16,7 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// serveSSE 起一个按行返回 SSE 的测试服务
+// serveSSE starts a test server that returns SSE line by line.
 func serveSSE(t *testing.T, lines ...string) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

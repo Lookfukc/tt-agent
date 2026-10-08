@@ -13,10 +13,11 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// GeminiProtocol Google Gemini API 适配器
+// GeminiProtocol is the adapter for the Google Gemini API.
 //
-// 与 OpenAI 的关键差异：role 用 model 而非 assistant；system 是
-// 独立的 systemInstruction；functionCall 无 ID，需本地合成
+// Key differences from OpenAI: the role is "model" rather than "assistant";
+// system is a separate systemInstruction; functionCall has no ID and one
+// must be synthesized locally.
 type GeminiProtocol struct {
 	providerID string
 	baseURL    string
@@ -25,24 +26,24 @@ type GeminiProtocol struct {
 	quirks     Quirks
 }
 
-// NewGemini 构造协议适配器
-// providerID: 提供商标识
-// baseURL: API 根地址，如 https://generativelanguage.googleapis.com/v1beta
-// apiKey: 鉴权密钥
-// returns: 可用的适配器实例
+// NewGemini constructs the protocol adapter.
+// providerID: the provider identifier.
+// baseURL: the API root URL, e.g. https://generativelanguage.googleapis.com/v1beta.
+// apiKey: the authentication key.
+// returns: a ready-to-use adapter instance.
 func NewGemini(providerID, baseURL, apiKey string, quirks Quirks) *GeminiProtocol {
 	return &GeminiProtocol{
 		providerID: providerID,
 		baseURL:    baseURL,
 		apiKey:     apiKey,
-		client:     &http.Client{}, // 总超时由调用点 ctx 控制，Client.Timeout 会砍断长流式响应
+		client:     &http.Client{}, // the overall timeout is controlled by the caller's ctx; Client.Timeout would cut off long streaming responses
 		quirks:     quirks,
 	}
 }
 
-// Chat 发送非流式对话请求
+// Chat sends a non-streaming chat request.
 func (p *GeminiProtocol) Chat(ctx context.Context, req core.ChatRequest) (*core.ChatResponse, error) {
-	// client 层不设总超时（会砍断长流式），非流式在此自兜底
+	// The client layer sets no overall timeout (it would cut off long streams); non-streaming calls apply their own fallback here.
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	body, err := p.buildBody(req)
@@ -65,7 +66,7 @@ func (p *GeminiProtocol) Chat(ctx context.Context, req core.ChatRequest) (*core.
 	return p.parseResponse(raw)
 }
 
-// buildBody 构建请求体
+// buildBody builds the request body.
 func (p *GeminiProtocol) buildBody(req core.ChatRequest) (map[string]any, error) {
 	var system string
 	contents := make([]map[string]any, 0, len(req.Messages))
@@ -79,11 +80,12 @@ func (p *GeminiProtocol) buildBody(req core.ChatRequest) (map[string]any, error)
 		case core.RoleAssistant:
 			role = "model"
 		case core.RoleTool:
-			// 并行工具的多条结果合并进同一条 user content，
-			// 官方模式如此，逐条映射会产出连续 user 角色
+			// Multiple results from parallel tools are merged into a single user
+			// content; this is the official pattern — mapping them one-by-one
+			// would produce consecutive user roles.
 			frParts := []map[string]any{{
 				"functionResponse": map[string]any{
-					// response 必须是对象，纯文本包一层 result
+					// response must be an object; wrap plain text in a result field.
 					"name":     toolNameOf(m.ToolCallID),
 					"response": map[string]any{"result": m.Content},
 				},
@@ -164,7 +166,7 @@ func (p *GeminiProtocol) buildBody(req core.ChatRequest) (map[string]any, error)
 		genCfg["maxOutputTokens"] = req.MaxTokens
 	}
 	if req.Thinking != nil {
-		// thinkingBudget 0 关、-1 动态，正数为固定预算
+		// thinkingBudget: 0 disables, -1 is dynamic, a positive number is a fixed budget.
 		budget := int64(0)
 		if req.Thinking.Enabled {
 			budget = -1
@@ -190,12 +192,13 @@ func (p *GeminiProtocol) buildBody(req core.ChatRequest) (map[string]any, error)
 	return body, nil
 }
 
-// geminiPartOf 转换单个多模态分片
+// geminiPartOf converts a single multimodal part.
 //
-// Data URI 转 inlineData；外链图片明确报错：
-// fileData.fileUri 只接受 Files API 返回的 URI，
-// 塞 http URL 会 400，静默映射不如装配期拒绝
-// returns: Gemini part 或错误
+// Data URIs become inlineData; external image links fail explicitly:
+// fileData.fileUri only accepts URIs returned by the Files API, and
+// stuffing an http URL into it yields a 400 — rejecting at assembly
+// time beats mapping silently.
+// returns: a Gemini part or an error.
 func geminiPartOf(p core.ContentPart) (map[string]any, error) {
 	if p.Type == "image" {
 		if mime, data, ok := p.ImageData(); ok {
@@ -209,12 +212,13 @@ func geminiPartOf(p core.ContentPart) (map[string]any, error) {
 	return map[string]any{"text": p.Text}, nil
 }
 
-// toolNameOf 从合成 ID 里恢复函数名
+// toolNameOf recovers the function name from a synthesized ID.
 //
-// Gemini 靠 name 而非 ID 关联，适配器合成的 ID 形如 gemini:<name>，
-// 同名并行调用消歧后为 gemini:<name>:<出现序号>。工具名约定为
-// [a-zA-Z0-9_-]、不含 ':'，因此按最后一个 ':' 截掉序号是安全的
-// returns: 函数名，还原失败时退回 ID 原文
+// Gemini correlates by name rather than ID; adapter-synthesized IDs have the
+// form gemini:<name>, disambiguated as gemini:<name>:<occurrence-index> for
+// parallel calls with the same name. Tool names are constrained to
+// [a-zA-Z0-9_-] and contain no ':', so cutting the index at the last ':' is safe.
+// returns: the function name; falls back to the raw ID when recovery fails.
 func toolNameOf(callID string) string {
 	rest, ok := strings.CutPrefix(callID, "gemini:")
 	if !ok {
@@ -226,12 +230,14 @@ func toolNameOf(callID string) string {
 	return rest
 }
 
-// geminiCallID 合成 functionCall 的调用 ID
+// geminiCallID synthesizes a call ID for a functionCall.
 //
-// Gemini 原生不返回调用 ID；同名并行调用直接用名字会撞号，
-// 跨协议回放历史时无法区分。第二次同名调用起在名字后追加
-// 出现序号（从 1 计）消歧，首次调用保持旧格式 gemini:<name>，
-// 兼容既有会话记录
+// Gemini does not natively return call IDs; using the bare name for parallel
+// calls with the same name would collide, making them indistinguishable when
+// replaying history across protocols. From the second same-name call onward an
+// occurrence index (counting from 1) is appended for disambiguation, while the
+// first call keeps the legacy format gemini:<name> for compatibility with
+// existing session records.
 func geminiCallID(name string, seq int) string {
 	if seq <= 0 {
 		return "gemini:" + name
@@ -239,9 +245,9 @@ func geminiCallID(name string, seq int) string {
 	return fmt.Sprintf("gemini:%s:%d", name, seq)
 }
 
-// post 发送请求
-// action: :generateContent 或 :streamGenerateContent
-// returns: HTTP 响应
+// post sends the request.
+// action: ":generateContent" or ":streamGenerateContent".
+// returns: the HTTP response.
 func (p *GeminiProtocol) post(ctx context.Context, body map[string]any, action string) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -262,8 +268,8 @@ func (p *GeminiProtocol) post(ctx context.Context, body map[string]any, action s
 	return resp, nil
 }
 
-// parseResponse 解析非流式响应
-// returns: 统一响应
+// parseResponse parses a non-streaming response.
+// returns: the unified response.
 func (p *GeminiProtocol) parseResponse(raw []byte) (*core.ChatResponse, error) {
 	var envelope struct {
 		Candidates []struct {
@@ -309,9 +315,10 @@ func (p *GeminiProtocol) parseResponse(raw []byte) (*core.ChatResponse, error) {
 			if string(args) == "null" {
 				args = []byte("{}")
 			}
-			// Gemini 不返回调用 ID，合成 ID 内嵌函数名，tool 消息
-			// 回传 functionResponse 时用它还原 name；同名并行调用
-			// 按出现序号消歧，避免 ID 撞号
+			// Gemini returns no call ID; the synthesized ID embeds the function
+			// name, which is recovered when a tool message sends back the
+			// functionResponse; parallel calls with the same name are
+			// disambiguated by occurrence index to avoid ID collisions.
 			seq := nameSeq[part.FunctionCall.Name]
 			nameSeq[part.FunctionCall.Name] = seq + 1
 			out.ToolCalls = append(out.ToolCalls, core.ToolCall{
@@ -324,7 +331,7 @@ func (p *GeminiProtocol) parseResponse(raw []byte) (*core.ChatResponse, error) {
 	return out, nil
 }
 
-// httpError HTTP 错误转统一错误
+// httpError converts an HTTP error into a unified error.
 func (p *GeminiProtocol) httpError(status int, retryAfter string, body []byte) error {
 	kind := core.ErrProviderInternal
 	switch {
@@ -352,8 +359,8 @@ func (p *GeminiProtocol) httpError(status int, retryAfter string, body []byte) e
 	return ce
 }
 
-// geminiFinish 终止原因映射
-// returns: 统一终止原因
+// geminiFinish maps finish reasons.
+// returns: the unified finish reason.
 func geminiFinish(reason string) core.FinishReason {
 	switch reason {
 	case "MAX_TOKENS":
@@ -365,12 +372,12 @@ func geminiFinish(reason string) core.FinishReason {
 	}
 }
 
-// geminiPart 响应内容分片
+// geminiPart is a response content part.
 type geminiPart struct {
 	Text string `json:"text"`
-	// Thought 思考分片标记
+	// Thought marks a thinking part.
 	Thought bool `json:"thought,omitempty"`
-	// FunctionCall 函数调用分片
+	// FunctionCall is a function call part.
 	FunctionCall *struct {
 		Name string         `json:"name"`
 		Args map[string]any `json:"args"`

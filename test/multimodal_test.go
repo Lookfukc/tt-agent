@@ -97,7 +97,7 @@ func TestGeminiMultimodal(t *testing.T) {
 }
 
 func TestImageDataParse(t *testing.T) {
-	// 非法 Data URI 应回退 URL 语义
+	// An invalid Data URI should fall back to URL semantics.
 	p := core.ContentPart{Type: "image", ImageURL: "https://x/a.png"}
 	if _, _, ok := p.ImageData(); ok {
 		t.Error("http url is not a data uri")

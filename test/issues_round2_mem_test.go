@@ -8,26 +8,31 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 )
 
-// maxSessionLineMirror 镜像 pkg/memory/persistent.go 的未导出常量
-// maxSessionLine（4<<20）：黑盒测试拿不到符号，只能按值推导阈值
+// maxSessionLineMirror mirrors pkg/memory/persistent.go's unexported constant
+// maxSessionLine (4<<20): black-box tests cannot access the symbol, so the
+// threshold is derived from the value
 const maxSessionLineMirror = 4 << 20
 
-// readBufferMirror 镜像 loadSession 的 Reader 缓冲 64KB：
-// 旧实现的"重置后重新累积"从第 65 块之后吐出尾部，偏移由此推出
+// readBufferMirror mirrors loadSession's 64KB reader buffer:
+// the old implementation's "reset then re-accumulate" emitted a tail after the
+// 65th chunk, and the offset is derived from that
 const readBufferMirror = 64 * 1024
 
-// TestN4_ReadLineCapHoldsForOverlongLine 超长行的尾部不得被当成独立行恢复
+// TestN4_ReadLineCapHoldsForOverlongLine: the tail of an overlong line must not be recovered as an independent line
 //
-// 旧实现超限后把 buf 重置为 nil 继续累积，行尾最后一段（< limit）
-// 会被当正常行返回：构造行长 > limit+64KB 且尾部恰好是合法 JSON，
-// 旧实现会把 "TAIL-POISON" 恢复成消息
+// The old implementation reset buf to nil past the limit and kept accumulating,
+// so the last segment of the line (< limit) was returned as a normal line:
+// constructing a line longer than limit+64KB whose tail happens to be valid JSON
+// made the old implementation recover "TAIL-POISON" as a message
 func TestN4_ReadLineCapHoldsForOverlongLine(t *testing.T) {
 	dir := t.TempDir()
 
-	// 旧实现丢弃 [limit, limit+64KB) 一块后从 limit+64KB 偏移重新累积，
-	// 让合法 JSON 从该偏移起开始，正好落入旧实现吐出的"尾部行"
+	// The old implementation discarded one [limit, limit+64KB) chunk and
+	// re-accumulated from offset limit+64KB; starting the valid JSON at that
+	// offset lands it exactly in the "tail line" the old implementation emitted
 	pad := strings.Repeat("x", maxSessionLineMirror+readBufferMirror)
 	tail := `{"role":"user","content":"TAIL-POISON"}`
 	content := `{"role":"user","content":"first"}` + "\n" + pad + tail + "\n"
@@ -48,15 +53,16 @@ func TestN4_ReadLineCapHoldsForOverlongLine(t *testing.T) {
 	}
 }
 
-// TestN4_ExactLimitLineLoaded 恰好等于上限的整行（含换行）必须保留
+// TestN4_ExactLimitLineLoaded: a whole line (including newline) exactly at the limit must be kept
 //
-// 判超限用严格大于：等于 limit 的合法大消息不能被误杀
+// The over-limit check uses strictly greater-than: a valid large message
+// exactly at limit must not be wrongly dropped
 func TestN4_ExactLimitLineLoaded(t *testing.T) {
 	dir := t.TempDir()
 
 	prefix := `{"role":"user","content":"`
 	suffix := `"}`
-	padLen := maxSessionLineMirror - 1 - len(prefix) - len(suffix) // 1 字节留给换行
+	padLen := maxSessionLineMirror - 1 - len(prefix) - len(suffix) // 1 byte reserved for the newline
 	line := prefix + strings.Repeat("y", padLen) + suffix
 	if len(line)+1 != maxSessionLineMirror {
 		t.Fatalf("setup: raw line = %d bytes, want %d", len(line)+1, maxSessionLineMirror)
@@ -69,7 +75,8 @@ func TestN4_ExactLimitLineLoaded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPersistent: %v", err)
 	}
-	// 预算给足（4MB 内容粗估约 2M token），避免预算截断干扰断言
+	// Budget is generous (4MB of content is roughly 2M tokens by rough estimate),
+	// to keep budget truncation from interfering with the assertions
 	got, err := p.Recent(context.Background(), "s2", 1<<30)
 	if err != nil {
 		t.Fatalf("Recent: %v", err)
@@ -82,23 +89,25 @@ func TestN4_ExactLimitLineLoaded(t *testing.T) {
 	}
 }
 
-// perMessageCounter 每条消息恒计 1 token 的估算器
+// perMessageCounter is an estimator that always counts 1 token per message
 type perMessageCounter struct{}
 
-// Count 按消息条数计数
-// returns: 消息条数
+// Count counts by number of messages
+// returns: the message count
 func (perMessageCounter) Count(msgs []core.Message) int64 { return int64(len(msgs)) }
 
-// TestL_M1SummaryUsesInjectedCounter 注入估算器后预算装填按注入口径执行
+// TestL_M1SummaryUsesInjectedCounter: with an injected estimator, budget packing follows the injected metric
 //
-// 同一数据同一预算：注入口径（每条 1 token）保留最近 3 条，
-// 内置粗估（每条约 29 token）一条都装不下、走兜底只留最新一组，
-// 截断点不同证明记账确实换了计数器
+// Same data, same budget: the injected metric (1 token per message) keeps the
+// most recent 3 messages, while the built-in rough estimate (~29 tokens per
+// message) fits none and falls back to keeping only the newest group;
+// the differing truncation points prove the accounting really switched counters
 func TestL_M1SummaryUsesInjectedCounter(t *testing.T) {
 	ctx := context.Background()
 	msgs := make([]core.Message, 0, 5)
 	for i := 0; i < 5; i++ {
-		// 19 个三字节汉字 + 序号：粗估约 29 token/条，注入口径 1 token/条
+		// 19 three-byte CJK characters + an index digit: roughly 29 tokens/message
+		// by rough estimate, 1 token/message under the injected metric
 		msgs = append(msgs, core.Message{
 			Role:    core.RoleUser,
 			Content: strings.Repeat("字", 19) + string(rune('0'+i)),
@@ -115,7 +124,7 @@ func TestL_M1SummaryUsesInjectedCounter(t *testing.T) {
 		return users
 	}
 
-	injected := memory.NewSummaryWithCounter(memory.NewBuffer(nil), &summaryLLM{}, perMessageCounter{})
+	injected := memory.NewSummaryWithCounter(memorytest.NewBuffer(nil), &summaryLLM{}, perMessageCounter{})
 	if err := injected.Add(ctx, "s-inj", msgs...); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -129,8 +138,9 @@ func TestL_M1SummaryUsesInjectedCounter(t *testing.T) {
 		t.Fatalf("L-M1: injected counter truncation point wrong, users = %v", users)
 	}
 
-	// 对照组：默认构造维持内置粗估口径，同一预算下截得更早
-	def := memory.NewSummary(memory.NewBuffer(nil), &summaryLLM{})
+	// Control group: the default constructor keeps the built-in rough-estimate
+	// metric and truncates earlier under the same budget
+	def := memory.NewSummary(memorytest.NewBuffer(nil), &summaryLLM{})
 	if err := def.Add(ctx, "s-def", msgs...); err != nil {
 		t.Fatalf("Add: %v", err)
 	}

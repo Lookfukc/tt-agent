@@ -12,13 +12,13 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// anthropicVersion API 版本号，Anthropic 强制要求随请求携带
+// anthropicVersion is the API version string; Anthropic requires it on every request.
 const anthropicVersion = "2023-06-01"
 
-// defaultAnthropicMaxTokens max_tokens 为 Anthropic 必填项，统一请求缺省值
+// defaultAnthropicMaxTokens is the default max_tokens used to satisfy the Anthropic requirement that the field be present.
 const defaultAnthropicMaxTokens = 4096
 
-// AnthropicProtocol Anthropic Messages API 适配器
+// AnthropicProtocol is the adapter for the Anthropic Messages API.
 type AnthropicProtocol struct {
 	providerID string
 	baseURL    string
@@ -27,24 +27,24 @@ type AnthropicProtocol struct {
 	quirks     Quirks
 }
 
-// NewAnthropic 构造协议适配器
-// providerID: 提供商标识
-// baseURL: API 根地址，如 https://api.anthropic.com
-// apiKey: 鉴权密钥
-// returns: 可用的适配器实例
+// NewAnthropic constructs the protocol adapter.
+// providerID: the provider identifier.
+// baseURL: the API root URL, e.g. https://api.anthropic.com.
+// apiKey: the authentication key.
+// returns: a ready-to-use adapter instance.
 func NewAnthropic(providerID, baseURL, apiKey string, quirks Quirks) *AnthropicProtocol {
 	return &AnthropicProtocol{
 		providerID: providerID,
 		baseURL:    baseURL,
 		apiKey:     apiKey,
-		client:     &http.Client{}, // 总超时由调用点 ctx 控制，Client.Timeout 会砍断长流式响应
+		client:     &http.Client{}, // the overall timeout is controlled by the caller's ctx; Client.Timeout would cut off long streaming responses
 		quirks:     quirks,
 	}
 }
 
-// Chat 发送非流式对话请求
+// Chat sends a non-streaming chat request.
 func (p *AnthropicProtocol) Chat(ctx context.Context, req core.ChatRequest) (*core.ChatResponse, error) {
-	// client 层不设总超时（会砍断长流式），非流式在此自兜底
+	// The client layer sets no overall timeout (it would cut off long streams); non-streaming calls apply their own fallback here.
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	body, err := p.buildBody(req, false)
@@ -101,10 +101,11 @@ func (p *AnthropicProtocol) Chat(ctx context.Context, req core.ChatRequest) (*co
 	return out, nil
 }
 
-// buildBody 构建请求体
+// buildBody builds the request body.
 //
-// 与 OpenAI 的关键差异：system 是顶层字段而非消息；max_tokens 必填；
-// 消息 content 是块数组，tool 结果以 tool_result 块回传
+// Key differences from OpenAI: system is a top-level field rather than a message;
+// max_tokens is required; message content is an array of blocks, and tool results
+// are sent back as tool_result blocks.
 func (p *AnthropicProtocol) buildBody(req core.ChatRequest, stream bool) (map[string]any, error) {
 	var system string
 	msgs := make([]map[string]any, 0, len(req.Messages))
@@ -114,8 +115,9 @@ func (p *AnthropicProtocol) buildBody(req core.ChatRequest, stream bool) (map[st
 		case m.Role == core.RoleSystem:
 			system += m.Content
 		case m.Role == core.RoleTool:
-			// 角色必须严格交替：并行工具的多条结果合并进
-			// 同一条 user 消息，逐条映射会产出连续 user 而 400
+			// Roles must strictly alternate: multiple results from parallel tools are
+			// merged into a single user message; mapping them one-by-one would produce
+			// consecutive user messages and a 400.
 			blocks := []map[string]any{{
 				"type":        "tool_result",
 				"tool_use_id": m.ToolCallID,
@@ -189,17 +191,18 @@ func (p *AnthropicProtocol) buildBody(req core.ChatRequest, stream bool) (map[st
 	}
 	thinkingBudget := int64(0)
 	if req.Thinking != nil && req.Thinking.Enabled {
-		// Anthropic 思考模式必须给预算，下限 1024
+		// Anthropic's thinking mode requires a budget with a minimum of 1024.
 		thinkingBudget = req.Thinking.BudgetTokens
 		if thinkingBudget < 1024 {
 			thinkingBudget = 1024
 		}
 		body["thinking"] = map[string]any{"type": "enabled", "budget_tokens": thinkingBudget}
 	}
-	// Anthropic 无原生 response_format；静默忽略会让调用方以为
-	// 约束生效，显式报错迫使其选别的协议或方案。
-	// 用 ErrUnsupported 包装：裸 fmt.Errorf 会被统一错误分类
-	// 兜底成可重试的网络错误，导致无意义重放
+	// Anthropic has no native response_format; silently ignoring it would make
+	// callers believe the constraint took effect, so fail explicitly to force
+	// them to pick another protocol or approach.
+	// Wrap with ErrUnsupported: a bare fmt.Errorf would fall through the unified
+	// error classification into a retryable network error, causing pointless replays.
 	if req.ResponseFormat != nil {
 		return nil, core.NewError(core.ErrUnsupported, p.providerID,
 			fmt.Errorf("anthropic: ResponseFormat not supported, use tool-forced structured output instead"))
@@ -214,13 +217,14 @@ func (p *AnthropicProtocol) buildBody(req core.ChatRequest, stream bool) (map[st
 		p.quirks.PatchRequest(body, req)
 	}
 	if thinkingBudget > 0 {
-		// 思考开启时 API 只接受默认采样参数，带上 temperature/top_p 直接 400；
-		// 清理必须放在 Extra 合并与 PatchRequest 之后，否则用户或
-		// quirk 注入的采样参数会绕过拦截
+		// When thinking is enabled the API only accepts default sampling parameters;
+		// sending temperature/top_p yields an immediate 400.
+		// The cleanup must happen after the Extra merge and PatchRequest, otherwise
+		// sampling parameters injected by the user or a quirk would bypass the guard.
 		delete(body, "temperature")
 		delete(body, "top_p")
-		// API 硬性要求 max_tokens > thinking.budget_tokens，违反直接 400；
-		// 不足时抬到 budget+1024，保证思考之外还有可见输出空间
+		// The API hard-requires max_tokens > thinking.budget_tokens; violating it is an immediate 400.
+		// When insufficient, raise it to budget+1024 to guarantee visible output room beyond the thinking.
 		if mt, ok := bodyInt(body["max_tokens"]); !ok || mt <= thinkingBudget {
 			body["max_tokens"] = thinkingBudget + 1024
 		}
@@ -228,11 +232,11 @@ func (p *AnthropicProtocol) buildBody(req core.ChatRequest, stream bool) (map[st
 	return body, nil
 }
 
-// bodyInt 提取请求体中数值字段的 int64 值
+// bodyInt extracts the int64 value of a numeric field in the request body.
 //
-// body 值可能来自本适配器（int），也可能来自 Extra 透传
-// （经 JSON 反序列化后是 float64），两种都要认
-// returns: 数值与是否解析成功
+// Body values may come from this adapter (int) or be passed through from Extra
+// (float64 after JSON deserialization); both must be recognized.
+// returns: the numeric value and whether parsing succeeded.
 func bodyInt(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int:
@@ -245,10 +249,10 @@ func bodyInt(v any) (int64, bool) {
 	return 0, false
 }
 
-// anthropicParts 转换多模态分片为 Anthropic content 块
+// anthropicParts converts multimodal parts into Anthropic content blocks.
 //
-// Data URI 转 base64 source；http URL 保持 url source
-// returns: 内容块数组
+// Data URIs become base64 sources; http URLs stay as url sources.
+// returns: the array of content blocks.
 func anthropicParts(parts []core.ContentPart) []map[string]any {
 	out := make([]map[string]any, 0, len(parts))
 	for _, p := range parts {
@@ -274,7 +278,7 @@ func anthropicParts(parts []core.ContentPart) []map[string]any {
 	return out
 }
 
-// post 发送请求
+// post sends the request.
 func (p *AnthropicProtocol) post(ctx context.Context, body map[string]any) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -296,7 +300,7 @@ func (p *AnthropicProtocol) post(ctx context.Context, body map[string]any) (*htt
 	return resp, nil
 }
 
-// httpError HTTP 错误转统一错误，状态码语义与 OpenAI 对齐
+// httpError converts an HTTP error into a unified error; status code semantics are aligned with OpenAI.
 func (p *AnthropicProtocol) httpError(status int, retryAfter string, body []byte) error {
 	kind := core.ErrProviderInternal
 	switch {
@@ -326,8 +330,8 @@ func (p *AnthropicProtocol) httpError(status int, retryAfter string, body []byte
 	return ce
 }
 
-// parseRetryAfter 解析 Retry-After 头
-// returns: 等待时长；解析失败时 ok 为 false
+// parseRetryAfter parses the Retry-After header.
+// returns: the wait duration; ok is false when parsing fails.
 func parseRetryAfter(v string) (time.Duration, bool) {
 	if v == "" {
 		return 0, false
@@ -339,8 +343,8 @@ func parseRetryAfter(v string) (time.Duration, bool) {
 	return time.Duration(secs) * time.Second, true
 }
 
-// anthropicFinish 终止原因映射
-// returns: 统一终止原因
+// anthropicFinish maps finish reasons.
+// returns: the unified finish reason.
 func anthropicFinish(reason string) core.FinishReason {
 	switch reason {
 	case "tool_use":
@@ -354,21 +358,21 @@ func anthropicFinish(reason string) core.FinishReason {
 	}
 }
 
-// anthropicBlock 响应内容块
+// anthropicBlock is a response content block.
 type anthropicBlock struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
-	// Thinking thinking 块内容
+	// Thinking is the content of a thinking block.
 	Thinking string `json:"thinking"`
-	// ID tool_use 块标识
+	// ID is the identifier of a tool_use block.
 	ID string `json:"id"`
-	// Name tool_use 块工具名
+	// Name is the tool name of a tool_use block.
 	Name string `json:"name"`
-	// Input tool_use 块参数对象，透传为 JSON 字符串
+	// Input is the arguments object of a tool_use block, passed through as a JSON string.
 	Input json.RawMessage `json:"input"`
 }
 
-// anthropicUsage 用量结构
+// anthropicUsage is the usage structure.
 type anthropicUsage struct {
 	InputTokens  int64 `json:"input_tokens"`
 	OutputTokens int64 `json:"output_tokens"`

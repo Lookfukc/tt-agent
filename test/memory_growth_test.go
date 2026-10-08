@@ -12,15 +12,16 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 )
 
-// growthLLM 记录请求体的摘要 mock，每次调用返回可区分的文本
+// growthLLM is a summarization mock that records request bodies; each call returns distinguishable text.
 type growthLLM struct {
 	mu     sync.Mutex
 	bodies []string
 }
 
-// Chat 记录 user 消息体并返回 S<n>
+// Chat records the user message body and returns S<n>.
 func (g *growthLLM) Chat(_ context.Context, req core.ChatRequest) (*core.ChatResponse, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -28,19 +29,19 @@ func (g *growthLLM) Chat(_ context.Context, req core.ChatRequest) (*core.ChatRes
 	return &core.ChatResponse{Content: fmt.Sprintf("S%d", len(g.bodies))}, nil
 }
 
-// ChatStream 未使用
+// ChatStream is unused.
 func (g *growthLLM) ChatStream(_ context.Context, _ core.ChatRequest) (<-chan core.StreamEvent, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
-// calls 返回已记录的调用数
+// calls returns the number of recorded calls.
 func (g *growthLLM) calls() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return len(g.bodies)
 }
 
-// waitFor 轮询等待条件成立，超时失败
+// waitFor polls until the condition holds, failing on timeout.
 func waitFor(t *testing.T, desc string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -53,10 +54,10 @@ func waitFor(t *testing.T, desc string, cond func() bool) {
 	t.Fatalf("condition not met within deadline: %s", desc)
 }
 
-// TestTTLExpiresIdleSessionsAndDeletesDisk 空闲会话被逐出且落盘文件同步删除
+// TestTTLExpiresIdleSessionsAndDeletesDisk verifies that idle sessions are evicted and their on-disk files deleted.
 //
-// 内存与磁盘的无限增长以 TTL 为统一出口：Persistent 的 Clear 本就删文件，
-// janitor 触发后磁盘不再残留死会话
+// TTL is the single choke point for unbounded growth in memory and on disk: Persistent's
+// Clear already deletes files, so once the janitor fires no dead sessions remain on disk.
 func TestTTLExpiresIdleSessionsAndDeletesDisk(t *testing.T) {
 	dir := t.TempDir()
 	inner, err := memory.NewPersistent(dir, nil)
@@ -84,12 +85,12 @@ func TestTTLExpiresIdleSessionsAndDeletesDisk(t *testing.T) {
 	}
 }
 
-// TestTTLActiveSessionSurvivesViaSummarySplit 活跃会话不被逐出——含 Split 旁路路径
+// TestTTLActiveSessionSurvivesViaSummarySplit verifies that active sessions are not evicted, including the Split bypass path.
 //
-// Summary 的 Split 快路径不走 TTL.Recent，若不触碰 TTL，
-// 活跃会话会被 janitor 误判空闲逐出；对照的空闲会话必须被逐出
+// Summary's fast Split path does not go through TTL.Recent; if the TTL were never touched,
+// the janitor would mistake an active session for idle and evict it — while the control idle session must be evicted.
 func TestTTLActiveSessionSurvivesViaSummarySplit(t *testing.T) {
-	buf := memory.NewBuffer(nil)
+	buf := memorytest.NewBuffer(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	ttl := memory.NewTTL(ctx, buf, 150*time.Millisecond, 20*time.Millisecond)
@@ -104,7 +105,7 @@ func TestTTLActiveSessionSurvivesViaSummarySplit(t *testing.T) {
 
 	deadline := time.Now().Add(600 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		_, _ = sum.Recent(ctx, "live", 1<<62) // 预算给足 → 走 Split，无压缩
+		_, _ = sum.Recent(ctx, "live", 1<<62) // generous budget → takes the Split path, no compaction
 		time.Sleep(40 * time.Millisecond)
 	}
 
@@ -118,9 +119,10 @@ func TestTTLActiveSessionSurvivesViaSummarySplit(t *testing.T) {
 	}
 }
 
-// TestPersistentLRUEvictionKeepsDataOnDisk LRU 卸载只卸内存不丢数据
+// TestPersistentLRUEvictionKeepsDataOnDisk verifies that LRU eviction unloads memory without losing data.
 //
-// 驻留超限后最久未访问的会话被卸载，再次访问应从盘上完整恢复
+// Once residency exceeds the limit, the least recently accessed session is unloaded;
+// accessing it again must fully restore it from disk.
 func TestPersistentLRUEvictionKeepsDataOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	p, err := memory.NewPersistentWithLRU(dir, nil, 2)
@@ -135,7 +137,7 @@ func TestPersistentLRUEvictionKeepsDataOnDisk(t *testing.T) {
 			t.Fatalf("Add s%d: %v", i, err)
 		}
 	}
-	// s2 驻入时 s0 已被 LRU 卸载；三个会话的数据必须都能找回
+	// When s2 is loaded, s0 has already been unloaded by LRU; all three sessions' data must be recoverable.
 	for i := 0; i < 3; i++ {
 		id := fmt.Sprintf("s%d", i)
 		got, err := p.Recent(ctx, id, 1<<62)
@@ -148,10 +150,10 @@ func TestPersistentLRUEvictionKeepsDataOnDisk(t *testing.T) {
 	}
 }
 
-// TestPersistentTrimRewritesDisk Trim 后重开实例只余未删消息
+// TestPersistentTrimRewritesDisk verifies that after Trim, reopening an instance leaves only non-deleted messages.
 //
-// 物理压缩必须真实落到磁盘：temp+rename 原子重写，系统消息保留，
-// 不残留 .tmp 文件
+// Physical compaction must actually reach the disk: an atomic temp+rename rewrite,
+// system messages preserved, and no leftover .tmp files.
 func TestPersistentTrimRewritesDisk(t *testing.T) {
 	dir := t.TempDir()
 	p, _ := memory.NewPersistent(dir, nil)
@@ -179,10 +181,10 @@ func TestPersistentTrimRewritesDisk(t *testing.T) {
 	}
 }
 
-// TestBufferTrimKeepsSystemMessages Buffer 的 Trim 不删系统消息
+// TestBufferTrimKeepsSystemMessages verifies that Buffer's Trim does not delete system messages.
 func TestBufferTrimKeepsSystemMessages(t *testing.T) {
 	ctx := context.Background()
-	buf := memory.NewBuffer(nil)
+	buf := memorytest.NewBuffer(nil)
 	_ = buf.Add(ctx, "s",
 		core.Message{Role: core.RoleSystem, Content: "sys"},
 		core.Message{Role: core.RoleUser, Content: "m1"},
@@ -196,10 +198,11 @@ func TestBufferTrimKeepsSystemMessages(t *testing.T) {
 	}
 }
 
-// TestCompactingSummaryShrinksDiskOnDisk 压缩态摘要物理收缩会话文件
+// TestCompactingSummaryShrinksDiskOnDisk verifies that compacting summary physically shrinks the session file.
 //
-// NewSummary 不动内层（审计保留）；NewCompactingSummary 摘要成功的
-// 消息从内层删除，重开实例只剩保留部分，且同一截断点不重复压缩
+// NewSummary leaves the inner layer untouched (audit retention); with NewCompactingSummary,
+// summarized messages are removed from the inner layer, a reopened instance holds only the
+// retained part, and the same truncation point is not compacted twice.
 func TestCompactingSummaryShrinksDiskOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	inner, _ := memory.NewPersistent(dir, nil)
@@ -209,7 +212,7 @@ func TestCompactingSummaryShrinksDiskOnDisk(t *testing.T) {
 
 	msgs := []core.Message{{Role: core.RoleSystem, Content: "sys"}}
 	for i := 0; i < 8; i++ {
-		// 每条约 60 字符 → 粗估 30 token，预算 100 稳定保留最近 3 条
+		// Each message is ~60 chars → roughly 30 tokens; a budget of 100 stably keeps the last 3.
 		msgs = append(msgs, core.Message{
 			Role:    core.RoleUser,
 			Content: fmt.Sprintf("long-msg-%02d-%s", i, strings.Repeat("x", 48)),
@@ -232,15 +235,15 @@ func TestCompactingSummaryShrinksDiskOnDisk(t *testing.T) {
 	}
 
 	remains, _ := inner.Recent(ctx, "s", 1<<62)
-	if len(remains) != 4 { // sys + 保留的 3 条
+	if len(remains) != 4 { // sys + 3 retained messages
 		t.Fatalf("inner after compact = %d msgs, want 4", len(remains))
 	}
-	// 同截断点重复取，命中缓存不重复压缩
+	// Repeated Recent at the same truncation point hits the cache; no re-compaction.
 	_, _ = mem.Recent(ctx, "s", 100)
 	if llm.calls() != 1 {
 		t.Fatalf("compress calls = %d after repeated Recent, want 1", llm.calls())
 	}
-	// 重开实例验证磁盘物理收缩
+	// Reopen the instance to verify the physical shrink on disk.
 	reopened, _ := memory.NewPersistent(dir, nil)
 	disk, _ := reopened.Recent(ctx, "s", 1<<62)
 	if len(disk) != len(remains) {
@@ -248,29 +251,30 @@ func TestCompactingSummaryShrinksDiskOnDisk(t *testing.T) {
 	}
 }
 
-// TestSummaryRollingMerge 截断点前进只压缩增量并与旧摘要合并
+// TestSummaryRollingMerge verifies that an advancing truncation point only compacts the increment and merges it into the old summary.
 //
-// 第二次压缩的输入应包含旧摘要文本与新增消息，不重复罗列已折入的消息
+// The second compaction's input must contain the old summary text plus the new messages,
+// without re-listing messages already folded in.
 func TestSummaryRollingMerge(t *testing.T) {
 	ctx := context.Background()
 	llm := &growthLLM{}
-	mem := memory.NewSummary(memory.NewBuffer(nil), llm)
+	mem := memory.NewSummary(memorytest.NewBuffer(nil), llm)
 
 	var msgs []core.Message
 	for i := 0; i < 8; i++ {
 		msgs = append(msgs, core.Message{
 			Role:    core.RoleUser,
-			Content: fmt.Sprintf("MSG-%d-%s", i, strings.Repeat("y", 24)), // 30 字符 → 15 token
+			Content: fmt.Sprintf("MSG-%d-%s", i, strings.Repeat("y", 24)), // 30 chars → 15 tokens
 		})
 	}
 	_ = mem.Add(ctx, "s", msgs...)
 
-	// 预算 100：保留 6 条（90），丢弃 2 → 第一次压缩
+	// Budget 100: keep 6 messages (90), drop 2 → first compaction.
 	_, _ = mem.Recent(ctx, "s", 100)
 	if llm.calls() != 1 {
 		t.Fatalf("calls = %d, want 1", llm.calls())
 	}
-	// 预算 60：保留 4 条，丢弃 4 → 增量 2 条，与 S1 合并
+	// Budget 60: keep 4 messages, drop 4 → an increment of 2 messages, merged with S1.
 	_, _ = mem.Recent(ctx, "s", 60)
 	if llm.calls() != 2 {
 		t.Fatalf("calls = %d, want 2", llm.calls())
@@ -287,13 +291,14 @@ func TestSummaryRollingMerge(t *testing.T) {
 	}
 }
 
-// TestCompactingSummaryConcurrentRecentNoDoubleTrim 并发 Recent 不会双重 Trim
+// TestCompactingSummaryConcurrentRecentNoDoubleTrim verifies that concurrent Recent calls do not double-Trim.
 //
-// 两个并发 Recent 各自 Split 到相同 dropped 再各自 Trim，第二次删的是
-// 尚未摘要的消息——按会话串行后恰好一次压缩、一次 Trim
+// Two concurrent Recent calls each Split to the same dropped set and each Trim; the second
+// deletion would hit not-yet-summarized messages — with per-session serialization there is
+// exactly one compaction and one Trim.
 func TestCompactingSummaryConcurrentRecentNoDoubleTrim(t *testing.T) {
 	ctx := context.Background()
-	inner := memory.NewBuffer(nil)
+	inner := memorytest.NewBuffer(nil)
 	llm := &growthLLM{}
 	mem := memory.NewCompactingSummary(inner, llm)
 
@@ -301,7 +306,7 @@ func TestCompactingSummaryConcurrentRecentNoDoubleTrim(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		msgs = append(msgs, core.Message{
 			Role:    core.RoleUser,
-			Content: fmt.Sprintf("m%d-%s", i, strings.Repeat("z", 26)), // 30 字符 → 15 token
+			Content: fmt.Sprintf("m%d-%s", i, strings.Repeat("z", 26)), // 30 chars → 15 tokens
 		})
 	}
 	_ = mem.Add(ctx, "s", msgs...)
@@ -311,7 +316,7 @@ func TestCompactingSummaryConcurrentRecentNoDoubleTrim(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = mem.Recent(ctx, "s", 60) // 保留 4，丢弃 6
+			_, _ = mem.Recent(ctx, "s", 60) // keep 4, drop 6
 		}()
 	}
 	wg.Wait()
@@ -325,9 +330,10 @@ func TestCompactingSummaryConcurrentRecentNoDoubleTrim(t *testing.T) {
 	}
 }
 
-// TestPersistentNewFormatWithLegacyLines 新旧落盘格式混读
+// TestPersistentNewFormatWithLegacyLines verifies reading a mix of old and new on-disk formats.
 //
-// 新格式带 ts/msg 包装，旧格式是裸消息；同文件混排都能恢复且保序
+// The new format uses a ts/msg envelope, the old format is a bare message; mixed lines in
+// the same file must all be restored in order.
 func TestPersistentNewFormatWithLegacyLines(t *testing.T) {
 	dir := t.TempDir()
 	lines := `{"role":"user","content":"legacy-first"}` + "\n" +
@@ -347,10 +353,138 @@ func TestPersistentNewFormatWithLegacyLines(t *testing.T) {
 		t.Fatalf("mixed format restore = %+v", got)
 	}
 
-	// 新写入必须是包装格式
+	// New writes must use the envelope format.
 	_ = p.Add(context.Background(), "s2", core.Message{Role: core.RoleUser, Content: "fresh"})
 	raw, _ := os.ReadFile(filepath.Join(dir, "s2.jsonl"))
 	if !strings.Contains(string(raw), `"msg"`) || !strings.Contains(string(raw), `"ts"`) {
 		t.Errorf("new writes should use envelope format: %s", raw)
+	}
+}
+
+// TestCompactingSummarySurvivesRestart verifies that a compacting summary persists with the session and recovers after restart.
+//
+// The summary text is the only copy of the old context under compacting mode (old messages
+// are physically deleted). After reopening: the summary prefix is still injected, and no
+// duplicate compaction is triggered (the cache is restored from disk).
+func TestCompactingSummarySurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	inner, err := memory.NewPersistent(dir, nil)
+	if err != nil {
+		t.Fatalf("NewPersistent: %v", err)
+	}
+	ctx := context.Background()
+	llm := &growthLLM{}
+	mem := memory.NewCompactingSummary(inner, llm)
+
+	msgs := []core.Message{{Role: core.RoleSystem, Content: "sys"}}
+	for i := 0; i < 8; i++ {
+		msgs = append(msgs, core.Message{
+			Role:    core.RoleUser,
+			Content: fmt.Sprintf("long-msg-%02d-%s", i, strings.Repeat("x", 48)),
+		})
+	}
+	if err := mem.Add(ctx, "s", msgs...); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	got, err := mem.Recent(ctx, "s", 100)
+	if err != nil {
+		t.Fatalf("Recent: %v", err)
+	}
+	if !hasSummaryText(got, "S1") {
+		t.Fatalf("no summary before restart: %+v", got)
+	}
+
+	// Simulate a process restart: fresh Persistent + fresh Summary, in-memory cache emptied.
+	reopenedInner, _ := memory.NewPersistent(dir, nil)
+	reopened := memory.NewCompactingSummary(reopenedInner, llm)
+	got2, err := reopened.Recent(ctx, "s", 100)
+	if err != nil {
+		t.Fatalf("Recent after restart: %v", err)
+	}
+	if !hasSummaryText(got2, "S1") {
+		t.Fatalf("summary lost after restart: %+v", got2)
+	}
+	if llm.calls() != 1 {
+		t.Fatalf("compress calls = %d after restart, want 1 (cache should restore from disk)", llm.calls())
+	}
+
+	// Clear also deletes the summary file; after reopening it is no longer injected.
+	if err := reopened.Clear(ctx, "s"); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "s.summary")); !os.IsNotExist(err) {
+		t.Fatalf("summary file should be removed by Clear")
+	}
+	third, _ := memory.NewPersistent(dir, nil)
+	got3, _ := third.Recent(ctx, "s", 1<<62)
+	if hasSummaryPrefix(got3) {
+		t.Fatalf("summary injected after Clear: %+v", got3)
+	}
+}
+
+// hasSummaryText reports whether any injected summary message contains the given text.
+func hasSummaryText(msgs []core.Message, text string) bool {
+	for _, m := range msgs {
+		if m.Role == core.RoleSystem && strings.Contains(m.Content, "此前对话摘要：") &&
+			strings.Contains(m.Content, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasSummaryPrefix reports whether any injected summary message exists.
+func hasSummaryPrefix(msgs []core.Message) bool {
+	for _, m := range msgs {
+		if m.Role == core.RoleSystem && strings.Contains(m.Content, "此前对话摘要：") {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPersistentSummaryStoreRoundTrip covers the SummaryStore interface's save/load and error handling.
+func TestPersistentSummaryStoreRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	p, err := memory.NewPersistent(dir, nil)
+	if err != nil {
+		t.Fatalf("NewPersistent: %v", err)
+	}
+	ctx := context.Background()
+
+	// An unsaved session returns empty.
+	text, covered, err := p.LoadSummary(ctx, "none")
+	if err != nil || text != "" || covered != 0 {
+		t.Fatalf("LoadSummary empty = (%q, %d, %v), want empty", text, covered, err)
+	}
+
+	// After saving it reads back, including covered.
+	if err := p.SaveSummary(ctx, "s1", 42, "hello world"); err != nil {
+		t.Fatalf("SaveSummary: %v", err)
+	}
+	text, covered, err = p.LoadSummary(ctx, "s1")
+	if err != nil || text != "hello world" || covered != 42 {
+		t.Fatalf("LoadSummary = (%q, %d, %v)", text, covered, err)
+	}
+
+	// A reopened instance still reads it back (truly on disk, not in memory).
+	p2, _ := memory.NewPersistent(dir, nil)
+	text, covered, err = p2.LoadSummary(ctx, "s1")
+	if err != nil || text != "hello world" || covered != 42 {
+		t.Fatalf("LoadSummary after reopen = (%q, %d, %v)", text, covered, err)
+	}
+
+	// Invalid sessionIDs are rejected without touching disk.
+	if err := p2.SaveSummary(ctx, "../evil", 1, "x"); err == nil {
+		t.Fatalf("SaveSummary should reject invalid session id")
+	}
+
+	// A corrupted summary file is treated as no summary, without error.
+	if err := os.WriteFile(filepath.Join(dir, "bad.summary"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write bad file: %v", err)
+	}
+	if text, _, err = p2.LoadSummary(ctx, "bad"); err != nil || text != "" {
+		t.Fatalf("LoadSummary corrupted = (%q, %v), want empty", text, err)
 	}
 }

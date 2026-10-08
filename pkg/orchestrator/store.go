@@ -9,26 +9,28 @@ import (
 	"sync"
 )
 
-// RunStore 运行状态存储抽象，checkpoint 续跑依赖它跨进程存活
+// RunStore is the run state storage abstraction; checkpoint resumption
+// depends on it outliving processes.
 type RunStore interface {
-	// Save 保存运行状态，同 ID 覆盖
+	// Save persists the run state; the same ID overwrites.
 	Save(run *RunState) error
-	// Get 读取运行状态
-	// returns: 运行状态；ok 为 false 表示不存在
+	// Get reads the run state.
+	// returns: the run state; ok is false if it does not exist
 	Get(id string) (*RunState, bool)
 }
 
-// FileRunStore 每个运行一个 JSON 文件的存储
+// FileRunStore is a store using one JSON file per run.
 //
-// 写入走临时文件加原子改名，进程崩溃不会留下半截状态
+// Writes go through a temp file plus an atomic rename, so a process crash
+// never leaves a half-written state behind.
 type FileRunStore struct {
 	dir string
 	mu  sync.Mutex
 }
 
-// NewFileRunStore 打开或创建运行状态目录
-// dir: 状态文件目录
-// returns: 就绪的存储实例
+// NewFileRunStore opens or creates the run state directory.
+// dir: the state file directory
+// returns: the ready store instance
 func NewFileRunStore(dir string) (*FileRunStore, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create run store dir: %w", err)
@@ -36,10 +38,11 @@ func NewFileRunStore(dir string) (*FileRunStore, error) {
 	return &FileRunStore{dir: dir}, nil
 }
 
-// Save 原子写入运行状态
+// Save atomically writes the run state.
 //
-// fsync 在 rename 前落盘：断电场景下 checkpoint 目录项可能先于
-// 数据生效，续跑会读到半截状态
+// fsync flushes before rename: under power loss, the checkpoint
+// directory entry could take effect before the data, and resumption
+// would read a half-written state.
 func (s *FileRunStore) Save(run *RunState) error {
 	if !validRunID(run.ID) {
 		return fmt.Errorf("invalid run id %q", run.ID)
@@ -73,8 +76,9 @@ func (s *FileRunStore) Save(run *RunState) error {
 	return nil
 }
 
-// validRunID 校验运行标识，runID 拼进文件路径须防穿越
-// returns: true 表示合法
+// validRunID validates the run identifier; runIDs are joined into file
+// paths and must guard against traversal.
+// returns: true if valid
 func validRunID(id string) bool {
 	if id == "" || len(id) > 128 {
 		return false
@@ -85,8 +89,8 @@ func validRunID(id string) bool {
 	return true
 }
 
-// Get 读取运行状态
-// returns: 运行状态；文件缺失或损坏时 ok 为 false
+// Get reads the run state.
+// returns: the run state; ok is false when the file is missing or corrupt
 func (s *FileRunStore) Get(id string) (*RunState, bool) {
 	if !validRunID(id) {
 		return nil, false

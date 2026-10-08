@@ -1,4 +1,5 @@
-// Package protocol 实现 OpenAI 兼容协议的请求构建、响应解析与流式解码
+// Package protocol implements request building, response parsing, and stream
+// decoding for OpenAI-compatible protocols.
 package protocol
 
 import (
@@ -15,24 +16,25 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// PatchFunc 请求体修补函数
-// body: 待发送的请求体，in place 修改
-// req: 原始统一请求，含 Thinking/Extra 等未落入 body 的信息
+// PatchFunc is a request body patch function.
+// body: the request body to be sent, modified in place.
+// req: the original unified request, carrying information not reflected in body such as Thinking/Extra.
 type PatchFunc func(body map[string]any, req core.ChatRequest)
 
-// Quirks 同一 OpenAI 协议下各提供商的偏差修正点
+// Quirks collects the correction points for provider deviations under the same OpenAI protocol.
 //
-// 厂商偏差集中在两处：请求体需要额外字段或删减字段；响应中
-// 私有扩展字段。以 hook 形式注入而非派生子类，新厂商零代码接入
+// Vendor deviations concentrate in two places: request bodies needing extra or
+// removed fields, and proprietary extension fields in responses. They are
+// injected as hooks rather than subclasses, so new vendors integrate with zero code.
 type Quirks struct {
-	// PatchRequest 请求体序列化前的修补，body 为顶层 map，可直接增删字段
+	// PatchRequest patches the request body before serialization; body is the top-level map whose fields can be added or removed directly.
 	PatchRequest PatchFunc
 
-	// DisableStreamUsage 部分提供商不认 stream_options 字段时置 true
+	// DisableStreamUsage set to true for providers that do not recognize the stream_options field.
 	DisableStreamUsage bool
 }
 
-// OpenAIProtocol OpenAI 兼容协议适配器
+// OpenAIProtocol is the adapter for OpenAI-compatible protocols.
 type OpenAIProtocol struct {
 	providerID string
 	baseURL    string
@@ -41,25 +43,25 @@ type OpenAIProtocol struct {
 	quirks     Quirks
 }
 
-// NewOpenAI 构造协议适配器
-// providerID: 提供商标识，用于错误信息与日志定位
-// baseURL: API 根地址，如 https://api.deepseek.com/v1
-// apiKey: 鉴权密钥
-// returns: 可用的适配器实例
+// NewOpenAI constructs the protocol adapter.
+// providerID: the provider identifier, used for error messages and log attribution.
+// baseURL: the API root URL, e.g. https://api.deepseek.com/v1.
+// apiKey: the authentication key.
+// returns: a ready-to-use adapter instance.
 func NewOpenAI(providerID, baseURL, apiKey string, quirks Quirks) *OpenAIProtocol {
 	return &OpenAIProtocol{
 		providerID: providerID,
 		baseURL:    baseURL,
 		apiKey:     apiKey,
-		// 每请求级超时由 ctx 控制，client 层只设上限防泄漏
-		client: &http.Client{}, // 总超时由调用点 ctx 控制，Client.Timeout 会砍断长流式响应
+		// Per-request timeouts are controlled by ctx; the client layer only caps to prevent leaks.
+		client: &http.Client{}, // the overall timeout is controlled by the caller's ctx; Client.Timeout would cut off long streaming responses
 		quirks: quirks,
 	}
 }
 
-// Chat 发送非流式对话请求
+// Chat sends a non-streaming chat request.
 func (p *OpenAIProtocol) Chat(ctx context.Context, req core.ChatRequest) (*core.ChatResponse, error) {
-	// client 层不设总超时（会砍断长流式），非流式在此自兜底
+	// The client layer sets no overall timeout (it would cut off long streams); non-streaming calls apply their own fallback here.
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	body, err := p.buildBody(req, false)
@@ -119,9 +121,9 @@ func (p *OpenAIProtocol) Chat(ctx context.Context, req core.ChatRequest) (*core.
 	return out, nil
 }
 
-// buildBody 将统一请求转为 OpenAI 格式 map
+// buildBody converts the unified request into an OpenAI-format map.
 //
-// 用 map 而非 struct 是为了让 Quirks.PatchRequest 能增删任意字段
+// A map is used rather than a struct so that Quirks.PatchRequest can add or remove arbitrary fields.
 func (p *OpenAIProtocol) buildBody(req core.ChatRequest, stream bool) (map[string]any, error) {
 	msgs := make([]map[string]any, 0, len(req.Messages))
 	for _, m := range req.Messages {
@@ -138,7 +140,7 @@ func (p *OpenAIProtocol) buildBody(req core.ChatRequest, stream bool) (map[strin
 			if len(t.Parameters) > 0 {
 				params = json.RawMessage(t.Parameters)
 			} else {
-				// 部分厂商对无参工具要求 schema 必须是 object
+				// Some vendors require the schema of a no-argument tool to be an object.
 				params = map[string]any{"type": "object", "properties": map[string]any{}}
 			}
 			tools = append(tools, map[string]any{
@@ -166,7 +168,7 @@ func (p *OpenAIProtocol) buildBody(req core.ChatRequest, stream bool) (map[strin
 			"json_schema": map[string]any{
 				"name":   name,
 				"schema": json.RawMessage(req.ResponseFormat.Schema),
-				// strict 模式拒绝非 schema 内容，否则约束只是建议
+				// strict mode rejects content that does not match the schema; otherwise the constraint is merely advisory.
 				"strict": true,
 			},
 		}
@@ -186,7 +188,7 @@ func (p *OpenAIProtocol) buildBody(req core.ChatRequest, stream bool) (map[strin
 	return body, nil
 }
 
-// buildMessage 转换单条消息，Reasoning 不回传
+// buildMessage converts a single message; Reasoning is not sent back.
 func buildMessage(m core.Message) map[string]any {
 	msg := map[string]any{"role": string(m.Role)}
 	if len(m.ContentParts) > 0 {
@@ -214,7 +216,7 @@ func buildMessage(m core.Message) map[string]any {
 	return msg
 }
 
-// post 发送请求，网络层错误统一包装
+// post sends the request; network-layer errors are uniformly wrapped.
 func (p *OpenAIProtocol) post(ctx context.Context, body map[string]any) (*http.Response, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -235,7 +237,7 @@ func (p *OpenAIProtocol) post(ctx context.Context, body map[string]any) (*http.R
 	return resp, nil
 }
 
-// httpError 将 HTTP 错误响应转为统一错误，附重试等待信息
+// httpError converts an HTTP error response into a unified error, attaching retry wait information.
 func (p *OpenAIProtocol) httpError(status int, retryAfter string, body []byte) error {
 	kind := core.ErrProviderInternal
 	switch {
@@ -248,7 +250,7 @@ func (p *OpenAIProtocol) httpError(status int, retryAfter string, body []byte) e
 	case status == 429:
 		kind = core.ErrRateLimited
 	}
-	// 提取结构化错误信息，失败时退回原始 body，保底可诊断
+	// Extract the structured error message; fall back to the raw body on failure so it stays diagnosable.
 	msg := string(body)
 	var errEnvelope struct {
 		Error struct {
@@ -269,7 +271,7 @@ func (p *OpenAIProtocol) httpError(status int, retryAfter string, body []byte) e
 	return ce
 }
 
-// normalizeFinish 统一终止原因，未知值按 stop 处理
+// normalizeFinish unifies finish reasons; unknown values are treated as stop.
 func normalizeFinish(reason string) core.FinishReason {
 	switch reason {
 	case "tool_calls", "function_call":
@@ -283,8 +285,8 @@ func normalizeFinish(reason string) core.FinishReason {
 	}
 }
 
-// openAIParts 转换多模态分片为 OpenAI content 数组
-// returns: 分片数组
+// openAIParts converts multimodal parts into an OpenAI content array.
+// returns: the array of parts.
 func openAIParts(parts []core.ContentPart) []map[string]any {
 	out := make([]map[string]any, 0, len(parts))
 	for _, p := range parts {
@@ -301,7 +303,7 @@ func openAIParts(parts []core.ContentPart) []map[string]any {
 	return out
 }
 
-// clampFloat 清理 NaN/Inf，避免 JSON 序列化失败
+// clampFloat sanitizes NaN/Inf to avoid JSON serialization failures.
 func clampFloat(v float64) float64 {
 	if math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0
@@ -309,7 +311,7 @@ func clampFloat(v float64) float64 {
 	return v
 }
 
-// openAIToolCall 协议层工具调用结构
+// openAIToolCall is the protocol-level tool call structure.
 type openAIToolCall struct {
 	ID       string `json:"id"`
 	Function struct {
@@ -318,21 +320,22 @@ type openAIToolCall struct {
 	} `json:"function"`
 }
 
-// openAIUsage 协议层用量结构
+// openAIUsage is the protocol-level usage structure.
 type openAIUsage struct {
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
-	// 部分提供商（DeepSeek/GLM）在 completion_tokens_details 中给思考 token
+	// Some providers (DeepSeek/GLM) report thinking tokens in completion_tokens_details.
 	CompletionTokensDetails struct {
 		ReasoningTokens int64 `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
 }
 
-// toCore 转为统一用量
+// toCore converts to the unified usage.
 //
-// OpenAI 系（含 DeepSeek/GLM）的 completion_tokens 已包含思考 token，
-// details 只是子集拆分：输出侧必须相减，否则 CostOf 与 Total 双重计费；
-// Gemini 的 thoughtsTokenCount 是独立口径，由其适配器直接相加
+// In the OpenAI family (including DeepSeek/GLM), completion_tokens already
+// includes thinking tokens and details is only a subset breakdown: the output
+// side must be subtracted, otherwise CostOf and Total double-count the billing;
+// Gemini's thoughtsTokenCount is an independent figure added directly by its adapter.
 func (u openAIUsage) toCore() core.Usage {
 	output := u.CompletionTokens - u.CompletionTokensDetails.ReasoningTokens
 	if output < 0 {

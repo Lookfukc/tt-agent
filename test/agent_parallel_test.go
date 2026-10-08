@@ -9,27 +9,27 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
-	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
-// slowTool 固定耗时并记录起止时间的工具，用于验证并行
+// slowTool takes a fixed duration and records start/end times, used to verify parallelism
 type slowTool struct {
 	mu     sync.Mutex
 	starts []time.Time
 	ends   []time.Time
 }
 
-// Name 工具名
+// Name returns the tool name.
 func (s *slowTool) Name() string { return "slow" }
 
-// Description 工具描述
+// Description returns the tool description.
 func (s *slowTool) Description() string { return "slow" }
 
-// Parameters 参数 schema
+// Parameters returns the parameter schema.
 func (s *slowTool) Parameters() json.RawMessage { return json.RawMessage(`{"type":"object"}`) }
 
-// Execute 睡 100ms 记录起止
+// Execute sleeps 100ms and records start/end times.
 func (s *slowTool) Execute(_ context.Context, _ json.RawMessage) (core.ToolResult, error) {
 	s.mu.Lock()
 	s.starts = append(s.starts, time.Now())
@@ -41,7 +41,7 @@ func (s *slowTool) Execute(_ context.Context, _ json.RawMessage) (core.ToolResul
 	return core.ToolResult{Text: "done"}, nil
 }
 
-// TestParallelToolExecution 两个工具并行时总耗时应接近单次而非两倍
+// TestParallelToolExecution verifies that two tools running in parallel take roughly a single run's time, not double.
 func TestParallelToolExecution(t *testing.T) {
 	llm := &scriptedLLM{turns: []core.Message{
 		{
@@ -57,7 +57,7 @@ func TestParallelToolExecution(t *testing.T) {
 	reg := tools.NewRegistry()
 	reg.Register(tool)
 
-	loop := agent.NewLoop(llm, reg, memory.NewBuffer(nil), loopConfig())
+	loop := agent.NewLoop(llm, reg, memorytest.NewBuffer(nil), loopConfig())
 	start := time.Now()
 	if _, _, err := loop.Run(context.Background(), "s1", "go"); err != nil {
 		t.Fatalf("Run: %v", err)
@@ -67,7 +67,7 @@ func TestParallelToolExecution(t *testing.T) {
 		t.Errorf("elapsed = %v, tools did not run in parallel", elapsed)
 	}
 
-	// 两个工具的启动时间都在另一个结束之前，说明存在重叠
+	// Each tool started before the other finished, proving the executions overlapped.
 	if len(tool.starts) != 2 {
 		t.Fatalf("executions = %d", len(tool.starts))
 	}
@@ -89,7 +89,7 @@ func TestParallelToolResultOrder(t *testing.T) {
 	}}
 	reg := tools.NewRegistry()
 	reg.Register(&slowTool{})
-	mem := memory.NewBuffer(nil)
+	mem := memorytest.NewBuffer(nil)
 	loop := agent.NewLoop(llm, reg, mem, loopConfig())
 	if _, _, err := loop.Run(context.Background(), "s2", "go"); err != nil {
 		t.Fatalf("Run: %v", err)

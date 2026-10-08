@@ -1,4 +1,4 @@
-// Package agent 提供 ReAct 模式的 Agent 执行循环
+// Package agent provides a ReAct-style agent execution loop.
 package agent
 
 import (
@@ -12,24 +12,26 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 )
 
-// ErrMaxIterations 迭代熔断错误
+// ErrMaxIterations is the iteration circuit-breaker error.
 var ErrMaxIterations = errors.New("agent loop: max iterations exceeded")
 
-// LoopEvent 循环过程事件，供外部观测与流式转发
+// LoopEvent is a loop-progress event for external observation and
+// streaming forwarding.
 type LoopEvent struct {
-	// SessionID 事件归属会话；同一 Loop 并发服务多会话时
-	// 回调来自多个 goroutine，靠它区分路由
+	// SessionID is the session the event belongs to; when one Loop
+	// concurrently serves multiple sessions the callback comes from
+	// multiple goroutines — this field distinguishes routing.
 	SessionID string
 	Iter      int
 	Type      LoopEventType
-	Text      string // 文本增量或工具名
+	Text      string // text delta or tool name
 	Reasoning string
 	Call      *core.ToolCall
-	Usage     *core.Usage // 仅 EventDone 携带累计用量
+	Usage     *core.Usage // cumulative usage, carried only by EventDone
 	Err       error
 }
 
-// LoopEventType 事件类别
+// LoopEventType is the event category.
 type LoopEventType int
 
 const (
@@ -42,25 +44,30 @@ const (
 	EventError
 )
 
-// Config 循环配置
+// Config is the loop configuration.
 type Config struct {
 	SystemPrompt  string
 	Model         string
 	Temperature   *float64
 	Thinking      *core.ThinkingConfig
 	MaxIterations int
-	// TokenBudget 单次 LLM 调用的输入 token 预算，超限触发记忆截断
+	// TokenBudget is the input token budget per LLM call; exceeding it
+	// triggers memory truncation.
 	TokenBudget int64
-	// OnEvent 过程回调，nil 表示不观测；回调阻塞会拖慢整个循环。
-	// 同一 Loop 并发服务多个会话时回调会来自多个 goroutine，
-	// 回调方必须并发安全，并按 LoopEvent.SessionID 路由
+	// OnEvent is the progress callback; nil means no observation. A
+	// blocking callback slows down the whole loop. When one Loop
+	// concurrently serves multiple sessions the callback comes from
+	// multiple goroutines: the callback owner must be concurrency-safe
+	// and route by LoopEvent.SessionID.
 	OnEvent func(LoopEvent)
 
-	// Tracer 链路追踪，nil 用空实现；产生 run/iter/llm/tool 四级 span
+	// Tracer is the trace sink; nil uses the no-op implementation.
+	// Produces run/iter/llm/tool four-level spans.
 	Tracer core.Tracer
 }
 
-// Loop ReAct 循环：推理 → 工具调用 → 观察 → 再推理，直到产出最终回答
+// Loop is the ReAct loop: reason → tool call → observe → reason
+// again, until a final answer is produced.
 type Loop struct {
 	llm    core.LLM
 	tools  *tools.Registry
@@ -68,14 +75,16 @@ type Loop struct {
 	cfg    Config
 }
 
-// NewLoop 构造循环实例，无状态可复用
-// llm: 对话能力实现
-// toolReg: 工具注册表，可为 nil 表示纯对话
-// mem: 会话记忆，按 sessionID 隔离
-// returns: 可用的循环实例
+// NewLoop constructs a loop instance; stateless and reusable.
+// llm: the chat capability implementation.
+// toolReg: the tool registry; may be nil for pure conversation.
+// mem: session memory, isolated by sessionID; only stateless mode
+// (RunWithHistory) may pass nil, in which case Run returns an error.
+// returns: a usable loop instance.
 func NewLoop(llm core.LLM, toolReg *tools.Registry, mem core.Memory, cfg Config) *Loop {
 	if cfg.MaxIterations <= 0 {
-		// 没有熔断上限的循环一次失控就能烧穿预算
+		// A loop without a circuit-breaker cap can burn through the
+		// budget with a single runaway.
 		cfg.MaxIterations = 16
 	}
 	if cfg.TokenBudget <= 0 {
@@ -84,19 +93,30 @@ func NewLoop(llm core.LLM, toolReg *tools.Registry, mem core.Memory, cfg Config)
 	return &Loop{llm: llm, tools: toolReg, memory: mem, cfg: cfg}
 }
 
-// Run 执行一轮完整对话
-// ctx: 取消时中断当前 LLM 调用或工具执行
-// sessionID: 会话标识，历史与新消息都落在此会话
-// input: 用户输入
-// returns: 最终 assistant 消息、全轮累计用量、终止性错误
+// Run executes one full conversation turn (stateful mode).
+// ctx: cancellation interrupts the current LLM call or tool execution.
+// sessionID: session identifier; history and new messages both land
+// in this session.
+// input: the user input.
+// returns: the final assistant message, cumulative usage for the
+// whole run, and a terminal error.
 func (l *Loop) Run(ctx context.Context, sessionID, input string) (core.Message, core.Usage, error) {
 	ctx, span := l.tracer().StartSpan(ctx, "agent.run", "model", l.cfg.Model, "session", sessionID)
 	defer span.End()
+	return l.run(ctx, sessionID, input)
+}
 
+// run is the loop body, shared by Run and RunWithHistory.
+//
+// The memory source differs (session storage vs one-shot carrier),
+// but the loop logic is identical.
+func (l *Loop) run(ctx context.Context, sessionID, input string) (core.Message, core.Usage, error) {
+	if l.memory == nil {
+		return core.Message{}, core.Usage{}, fmt.Errorf("agent loop: no memory attached, use RunWithHistory for stateless mode")
+	}
 	if err := l.memory.Add(ctx, sessionID, core.Message{
 		Role: core.RoleUser, Content: input,
 	}); err != nil {
-		span.RecordError(err)
 		return core.Message{}, core.Usage{}, err
 	}
 
@@ -107,11 +127,14 @@ func (l *Loop) Run(ctx context.Context, sessionID, input string) (core.Message, 
 		}
 		iterCtx, iterSpan := l.tracer().StartSpan(ctx, "agent.iter", "iter", iter)
 		result, err := l.iterate(iterCtx, sessionID, iter)
+		if err != nil {
+			iterSpan.RecordError(err)
+		}
 		iterSpan.End()
-		// 先累加再判错：失败轮的已产生用量也要计入
+		// Accumulate before checking the error: a failed iteration's
+		// already-incurred usage must still be counted.
 		total.Add(result.Usage)
 		if err != nil {
-			span.RecordError(err)
 			return core.Message{}, total, err
 		}
 		if result.Final {
@@ -124,16 +147,17 @@ func (l *Loop) Run(ctx context.Context, sessionID, input string) (core.Message, 
 	return core.Message{}, total, err
 }
 
-// iterResult 单轮迭代产物
+// iterResult is the product of a single iteration.
 type iterResult struct {
 	Message core.Message
 	Final   bool
-	// Usage 本轮 LLM 用量，失败轮也携带已产生部分
+	// Usage is this iteration's LLM usage; failed iterations still
+	// carry the already-incurred part.
 	Usage core.Usage
 }
 
-// iterate 执行一轮推理与工具调用
-// returns: 本轮消息与是否收敛
+// iterate performs one round of reasoning and tool calls.
+// returns: this iteration's message and whether it converged.
 func (l *Loop) iterate(ctx context.Context, sessionID string, iter int) (iterResult, error) {
 	l.emit(LoopEvent{SessionID: sessionID, Type: EventIterStart, Iter: iter})
 
@@ -150,7 +174,9 @@ func (l *Loop) iterate(ctx context.Context, sessionID string, iter int) (iterRes
 	}
 
 	if err := l.memory.Add(ctx, sessionID, msg); err != nil {
-		// 记忆层失败也走事件通道，调用方不能只靠返回值观测
+		// Memory-layer failures also go through the event channel;
+		// the caller must not rely on the return value alone to
+		// observe them.
 		l.emit(LoopEvent{SessionID: sessionID, Type: EventError, Iter: iter, Err: err})
 		return iterResult{Usage: usage}, err
 	}
@@ -163,13 +189,15 @@ func (l *Loop) iterate(ctx context.Context, sessionID string, iter int) (iterRes
 	for _, r := range results {
 		content := r.result.Render()
 		if r.err != nil {
-			// 工具失败不中断循环，把错误回传给模型让其自行调整
+			// A tool failure does not break the loop; the error is fed
+			// back to the model so it can adjust on its own.
 			content = fmt.Sprintf("tool error: %v", r.err)
 		}
 		if err := l.memory.Add(ctx, sessionID, core.Message{
 			Role: core.RoleTool, Content: content, ToolCallID: r.call.ID,
 		}); err != nil {
-			// 本轮用量已产生，失败路径也要带回给 Run 累计
+			// This iteration's usage was already incurred; the failure
+			// path must still carry it back for Run to accumulate.
 			l.emit(LoopEvent{SessionID: sessionID, Type: EventError, Iter: iter, Err: err})
 			return iterResult{Usage: usage}, err
 		}
@@ -177,8 +205,9 @@ func (l *Loop) iterate(ctx context.Context, sessionID string, iter int) (iterRes
 	return iterResult{Message: msg, Final: false, Usage: usage}, nil
 }
 
-// tracer 取配置的追踪器，nil 退化为空实现
-// returns: 追踪器
+// tracer returns the configured tracer; nil degrades to the no-op
+// implementation.
+// returns: the tracer.
 func (l *Loop) tracer() core.Tracer {
 	if l.cfg.Tracer != nil {
 		return l.cfg.Tracer
@@ -186,26 +215,35 @@ func (l *Loop) tracer() core.Tracer {
 	return core.NoopTracer()
 }
 
-// sanitizeHistory 规范化发往提供商的历史，修复悬空工具调用
+// sanitizeHistory normalizes the history sent to the provider,
+// repairing dangling tool calls.
 //
-// 记忆保存事实，仅在组装请求时修补：崩溃或落盘失败会让
-// assistant(tool_calls) 的结果永久缺失，之后每轮请求都带着
-// 悬空调用，Anthropic/OpenAI 一律 400，会话就此卡死。规则：
-//   - assistant(tool_calls) 后紧跟的连续 tool 消息中，无对应
-//     调用 ID 的（孤儿）与重复 ID 的直接丢弃；
-//   - 没等到结果的调用 ID，在组尾合成错误结果补齐；
-//   - 不紧跟 assistant(tool_calls) 的 tool 消息即孤儿，丢弃；
-//   - 其余消息原样透传
+// Memory stores facts; repairs happen only when assembling the
+// request: a crash or failed disk write can leave an
+// assistant(tool_calls) permanently missing its results, after which
+// every request carries the dangling call and Anthropic/OpenAI return
+// 400, wedging the session. Rules:
+//   - among the consecutive tool messages immediately following an
+//     assistant(tool_calls), those without a matching call ID
+//     (orphans) and those with duplicate IDs are dropped;
+//   - call IDs that never received a result get a synthesized error
+//     result appended at the end of the group;
+//   - tool messages not immediately following an
+//     assistant(tool_calls) are orphans and dropped;
+//   - all other messages pass through unchanged
 //
-// 修补结果不落记忆，内层存储保持真相
-// returns: 可安全发给提供商的消息切片，不修改入参
+// The repaired result is not written back to memory; the inner
+// storage keeps the truth.
+// returns: a message slice safe to send to the provider; the input is
+// not modified.
 func sanitizeHistory(history []core.Message) []core.Message {
 	out := make([]core.Message, 0, len(history))
 	for i := 0; i < len(history); i++ {
 		m := history[i]
 		if m.Role != core.RoleAssistant || len(m.ToolCalls) == 0 {
 			if m.Role == core.RoleTool {
-				// 前面没有携带调用的 assistant：孤儿结果，丢弃
+				// No preceding assistant carrying calls: orphan
+				// result, drop it.
 				continue
 			}
 			out = append(out, m)
@@ -233,8 +271,8 @@ func sanitizeHistory(history []core.Message) []core.Message {
 	return out
 }
 
-// containsCallID 判断调用列表是否含指定 ID
-// returns: true 表示存在
+// containsCallID reports whether the call list contains the given ID.
+// returns: true if present.
 func containsCallID(calls []core.ToolCall, id string) bool {
 	for _, c := range calls {
 		if c.ID == id {
@@ -244,17 +282,19 @@ func containsCallID(calls []core.ToolCall, id string) bool {
 	return false
 }
 
-// callLLM 发起一次流式调用并聚合结果
+// callLLM issues one streaming call and aggregates the result.
 //
-// 统一走流式路径，非流式模型由适配器内部降级，循环只维护一条通路
+// Everything goes through the streaming path; non-streaming models
+// degrade inside the adapter, so the loop maintains a single path.
 func (l *Loop) callLLM(ctx context.Context, history []core.Message, sessionID string, iter int) (core.Message, core.Usage, error) {
 	ctx, span := l.tracer().StartSpan(ctx, "llm.stream", "model", l.cfg.Model, "iter", iter)
 	defer span.End()
 
 	req := core.ChatRequest{
 		Model: l.cfg.Model,
-		// 请求侧规范化：悬空的 assistant(tool_calls) 补合成结果，
-		// 孤儿 tool 消息剔除；记忆本身不动
+		// Request-side normalization: dangling assistant(tool_calls)
+		// get synthesized results, orphan tool messages are removed;
+		// memory itself is untouched.
 		Messages: sanitizeHistory(history),
 		Thinking: l.cfg.Thinking,
 	}
@@ -292,18 +332,20 @@ func (l *Loop) callLLM(ctx context.Context, history []core.Message, sessionID st
 	return acc.Message(), usage, nil
 }
 
-// toolOutcome 单个工具调用的执行结果
+// toolOutcome is the execution result of a single tool call.
 type toolOutcome struct {
 	call   core.ToolCall
 	result core.ToolResult
 	err    error
 }
 
-// execTools 并行执行一轮的全部工具调用
+// execTools executes all tool calls of one iteration in parallel.
 //
-// 事件发射集中在发起 Run 的 goroutine 内；同一 Loop 并发跑
-// 多个会话时回调仍会来自多个 goroutine，回调方按 SessionID 路由；
-// 结果按调用顺序返回，保证落记忆的顺序与模型请求一致
+// Event emission is concentrated in the goroutine that started Run;
+// when one Loop concurrently runs multiple sessions the callback still
+// comes from multiple goroutines — callback owners route by SessionID.
+// Results are returned in call order, keeping the order written to
+// memory consistent with the model's request.
 func (l *Loop) execTools(ctx context.Context, sessionID string, iter int, calls []core.ToolCall) []toolOutcome {
 	outcomes := make([]toolOutcome, len(calls))
 	var wg sync.WaitGroup
@@ -312,8 +354,10 @@ func (l *Loop) execTools(ctx context.Context, sessionID string, iter int, calls 
 		wg.Add(1)
 		go func(i int, call core.ToolCall) {
 			defer wg.Done()
-			// 工具实现在第三方代码里，panic 必须兜住转为错误，
-			// 否则模型构造的输入可以直接打崩整个进程
+			// Tool implementations live in third-party code; panics
+			// must be caught and converted to errors, otherwise input
+			// constructed by the model could crash the whole process
+			// directly.
 			defer func() {
 				if r := recover(); r != nil {
 					outcomes[i] = toolOutcome{
@@ -338,8 +382,9 @@ func (l *Loop) execTools(ctx context.Context, sessionID string, iter int, calls 
 	return outcomes
 }
 
-// execTool 执行单个工具调用，不发射事件
-// returns: 工具结果；工具不存在或执行失败时返回错误
+// execTool executes a single tool call without emitting events.
+// returns: the tool result; an error if the tool is missing or its
+// execution failed.
 func (l *Loop) execTool(ctx context.Context, call core.ToolCall) (core.ToolResult, error) {
 	if l.tools == nil {
 		return core.ToolResult{}, fmt.Errorf("no tool registry attached")
@@ -351,7 +396,7 @@ func (l *Loop) execTool(ctx context.Context, call core.ToolCall) (core.ToolResul
 	return tool.Execute(ctx, json.RawMessage(call.Arguments))
 }
 
-// emit 派发过程事件
+// emit dispatches a progress event.
 func (l *Loop) emit(e LoopEvent) {
 	if l.cfg.OnEvent != nil {
 		l.cfg.OnEvent(e)

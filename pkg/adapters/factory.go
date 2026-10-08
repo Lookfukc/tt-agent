@@ -1,4 +1,4 @@
-// Package adapters 提供协议适配器的装配入口
+// Package adapters provides the assembly entry point for protocol adapters.
 package adapters
 
 import (
@@ -9,9 +9,9 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// NewLLM 按提供商配置装配 LLM 实例
-// cfg: 提供商配置，密钥需已通过 SetAPIKey 或 LoadAPIKeyFromEnv 绑定
-// returns: 实现核心 LLM 接口的适配器；协议不支持或密钥缺失时返回错误
+// NewLLM assembles an LLM instance from the provider configuration.
+// cfg: provider configuration; the API key must already be bound via SetAPIKey or LoadAPIKeyFromEnv.
+// returns: an adapter implementing the core LLM interface; returns an error if the protocol is unsupported or the key is missing.
 func NewLLM(cfg *provider.ProviderConfig) (core.LLM, error) {
 	key, ok := cfg.APIKey()
 	if !ok || key == "" {
@@ -29,10 +29,10 @@ func NewLLM(cfg *provider.ProviderConfig) (core.LLM, error) {
 	}
 }
 
-// NewLLMFromRegistry 便捷装配：注册表按 ID 取配置并构建
-// r: 提供商注册表
-// id: 提供商 ID
-// returns: LLM 实例
+// NewLLMFromRegistry is a convenience assembly helper: it fetches the configuration by ID from the registry and builds the LLM.
+// r: the provider registry.
+// id: the provider ID.
+// returns: an LLM instance.
 func NewLLMFromRegistry(r *provider.Registry, id string) (core.LLM, error) {
 	cfg, ok := r.Get(id)
 	if !ok {

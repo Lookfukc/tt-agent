@@ -12,62 +12,75 @@ import (
 	"time"
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
+	"github.com/Lookfukc/tt-agent/pkg/internal/sessionlog"
 )
 
-// Persistent JSONL 落盘的会话记忆
+// Persistent is a session memory persisted to JSONL files on disk.
 //
-// 每会话一个 <sessionID>.jsonl 追加文件，写穿透：内存缓存提供读，
-// 每条消息追加落盘。进程崩溃最多丢最后一条。
-// 会话按需惰性加载：首访问才读文件，长驻内存的会话数受
-// maxLoaded 约束，超限按 LRU 卸载（只卸内存不删盘，数据源是磁盘）
+// Each session is one <sessionID>.jsonl append-only file with
+// write-through: the in-memory cache serves reads, and every message
+// is appended to disk. A process crash loses at most the last entry.
+// Sessions are loaded lazily on demand: the file is read only on first
+// access, the number of sessions resident in memory is bounded by
+// maxLoaded, and the least recently used ones beyond that limit are
+// unloaded (memory only — the disk is never deleted, it is the source
+// of truth).
 type Persistent struct {
 	dir       string
 	mu        sync.RWMutex
 	sessions  map[string]*pEntry
 	counter   core.TokenCounter
-	maxLoaded int // 内存驻留会话上限，0 不限
+	maxLoaded int // cap on sessions resident in memory; 0 means unlimited
 }
 
-// pEntry 单会话的内存驻留态
+// pEntry holds the in-memory resident state of a single session.
 type pEntry struct {
-	log     sessionLog
-	lastUse time.Time // LRU 依据，Add/Recent/Trim 均触碰
-	// dirty 落盘失败过的会话：LRU 永不逐出（逐出即静默丢数据），
-	// 直到某次全量重写成功才清除
+	log     sessionlog.Log
+	lastUse time.Time // LRU basis; touched by Add/Recent/Trim alike
+	// dirty marks sessions whose disk write has failed: they are never
+	// evicted by LRU (eviction would silently lose data), until a full
+	// rewrite eventually succeeds and clears the flag.
 	dirty bool
 }
 
-// diskRecord 单行落盘记录：消息 + 入栈时间
+// diskRecord is the single-line on-disk record: message + push time.
 //
-// 旧格式是裸 core.Message（无 ts/msg 包装）。读取先按本结构解，
-// msg 角色为空再按裸消息重试，旧文件零迁移直接可用
+// The old format was a bare core.Message (no ts/msg wrapper). Reading
+// first decodes with this struct; if the msg role is empty it retries
+// as a bare message, so legacy files work with zero migration.
 type diskRecord struct {
 	TS  time.Time    `json:"ts,omitzero"`
 	Msg core.Message `json:"msg"`
 }
 
-// NewPersistent 打开或恢复持久化记忆
+// NewPersistent opens or restores a persistent memory.
 //
-// 会话数无上限（全靠磁盘，内存按访问惰性驻留）；会话数很大且
-// 都活跃时用 NewPersistentWithLRU 限制驻留上限
-// dir: 会话文件目录，不存在则创建
-// counter: token 估算器，nil 用内置粗估
-// returns: 就绪实例；目录不可写时返回错误
+// There is no cap on the number of sessions (everything lives on disk;
+// memory residency is lazy and access-driven); when the session count
+// is huge and all sessions are active, use NewPersistentWithLRU to
+// bound the residency limit.
+// dir: directory for session files, created if it does not exist.
+// counter: token estimator; nil uses the built-in rough estimate.
+// returns: a ready instance; an error if the directory is not writable.
 func NewPersistent(dir string, counter core.TokenCounter) (*Persistent, error) {
 	return NewPersistentWithLRU(dir, counter, 0)
 }
 
-// NewPersistentWithLRU 打开持久化记忆并限制内存驻留会话数
+// NewPersistentWithLRU opens a persistent memory and bounds the number
+// of sessions resident in memory.
 //
-// 旧实现在构造时全量加载目录下所有会话，万级会话会把进程压爆；
-// 惰性加载 + LRU 卸载后，内存占用只与"同时活跃的会话数"相关
-// dir: 会话文件目录
-// counter: token 估算器，nil 用内置粗估
-// maxLoaded: 内存驻留会话上限，超限卸载最久未访问的（盘上数据仍在）
-// returns: 就绪实例；目录不可写时返回错误
+// The old implementation eagerly loaded every session in the directory
+// at construction; tens of thousands of sessions would crush the
+// process. With lazy loading plus LRU unloading, memory usage depends
+// only on the number of simultaneously active sessions.
+// dir: directory for session files.
+// counter: token estimator; nil uses the built-in rough estimate.
+// maxLoaded: cap on sessions resident in memory; beyond the limit the
+// least recently accessed are unloaded (data stays on disk).
+// returns: a ready instance; an error if the directory is not writable.
 func NewPersistentWithLRU(dir string, counter core.TokenCounter, maxLoaded int) (*Persistent, error) {
 	if counter == nil {
-		counter = roughCounter{}
+		counter = sessionlog.Rough{}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create memory dir: %w", err)
@@ -80,15 +93,18 @@ func NewPersistentWithLRU(dir string, counter core.TokenCounter, maxLoaded int) 
 	}, nil
 }
 
-// maxSessionLine 单行上限，超长行按坏行跳过而非中断恢复
+// maxSessionLine is the per-line limit; oversized lines are skipped as
+// corrupt lines rather than aborting recovery.
 const maxSessionLine = 4 << 20
 
-// validSessionID 校验会话标识
+// validSessionID validates a session identifier.
 //
-// sessionID 直接拼进文件路径，含分隔符或 .. 即可穿越目录任意读写，
-// 入口处拦截是唯一防线。惰性加载后读路径也会触发文件访问，
-// Recent/Split/Trim 与 Add/Clear 一样必须校验
-// returns: true 表示合法
+// The sessionID is concatenated directly into file paths; one
+// containing separators or ".." could traverse directories and read or
+// write anywhere, so intercepting at the entry point is the only line
+// of defense. After lazy loading, read paths also trigger file access,
+// so Recent/Split/Trim must validate just like Add/Clear.
+// returns: true if the id is valid.
 func validSessionID(id string) bool {
 	if id == "" || len(id) > 128 {
 		return false
@@ -99,10 +115,11 @@ func validSessionID(id string) bool {
 	return true
 }
 
-// Add 追加消息并落盘
+// Add appends messages and writes them to disk.
 //
-// 落盘在锁内：并发 Add 的磁盘顺序必须与内存顺序一致，
-// 否则重启恢复出的会话乱序
+// The disk write happens under the lock: the on-disk ordering of
+// concurrent Adds must match the in-memory ordering, otherwise the
+// session restored after a restart would be out of order.
 func (p *Persistent) Add(_ context.Context, sessionID string, msgs ...core.Message) error {
 	if !validSessionID(sessionID) {
 		return fmt.Errorf("invalid session id %q", sessionID)
@@ -111,10 +128,11 @@ func (p *Persistent) Add(_ context.Context, sessionID string, msgs ...core.Messa
 	defer p.mu.Unlock()
 	e := p.loadLocked(sessionID)
 	now := time.Now()
-	e.log.add(p.counter, now, msgs...)
+	e.log.Add(p.counter, now, msgs...)
 
-	// 落盘失败不让进程崩溃，但调用方必须能感知；
-	// 标记脏防止 LRU 把"只在内存里"的数据卸载丢失
+	// A failed disk write must not crash the process, but the caller
+	// must be able to observe it; marking dirty prevents LRU from
+	// unloading data that now exists "only in memory" and losing it.
 	if err := p.appendDisk(sessionID, msgs, now); err != nil {
 		e.dirty = true
 		return err
@@ -122,38 +140,43 @@ func (p *Persistent) Add(_ context.Context, sessionID string, msgs ...core.Messa
 	return nil
 }
 
-// Recent 取回不超预算的最近消息，语义与 Buffer 一致
+// Recent returns the most recent messages within budget, with the same
+// semantics as memorytest.Buffer.
 func (p *Persistent) Recent(ctx context.Context, sessionID string, budget int64) ([]core.Message, error) {
 	kept, _, err := p.Split(ctx, sessionID, budget)
 	return kept, err
 }
 
-// Split 取回预算内外的消息，首访问惰性加载该会话
+// Split returns messages inside and outside the budget, lazily loading
+// the session on first access.
 func (p *Persistent) Split(_ context.Context, sessionID string, budget int64) ([]core.Message, []core.Message, error) {
 	if !validSessionID(sessionID) {
 		return nil, nil, fmt.Errorf("invalid session id %q", sessionID)
 	}
-	// 快路径：已驻留则只加读锁
+	// Fast path: if already resident, only a read lock is needed.
 	p.mu.RLock()
 	if e, ok := p.sessions[sessionID]; ok {
-		kept, dropped := e.log.split(budget)
+		kept, dropped := e.log.Split(budget)
 		p.mu.RUnlock()
 		return kept, dropped, nil
 	}
 	p.mu.RUnlock()
 
-	// 慢路径：首次访问，读文件需写锁（可能写 map）
+	// Slow path: first access; reading the file requires the write
+	// lock (it may write to the map).
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e := p.loadLocked(sessionID)
-	kept, dropped := e.log.split(budget)
+	kept, dropped := e.log.Split(budget)
 	return kept, dropped, nil
 }
 
-// Trim 物理丢弃最旧的 n 条非系统消息并原子重写会话文件
+// Trim physically discards the oldest n non-system messages and
+// atomically rewrites the session file.
 //
-// temp 文件全量重写后 rename 覆盖：进程在重写中途崩溃要么是旧文件
-// 要么是新文件，不会出现半截状态
+// A temp file is fully rewritten then renamed over the original: if
+// the process crashes mid-rewrite the file is either the old one or
+// the new one — a half-written state is impossible.
 func (p *Persistent) Trim(_ context.Context, sessionID string, n int) error {
 	if !validSessionID(sessionID) {
 		return fmt.Errorf("invalid session id %q", sessionID)
@@ -161,17 +184,20 @@ func (p *Persistent) Trim(_ context.Context, sessionID string, n int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	e := p.loadLocked(sessionID)
-	before := e.log.count()
-	e.log.trim(n)
-	if e.log.count() == before {
-		return nil // 无可删内容，不动盘
+	before := e.log.Count()
+	e.log.Trim(n)
+	if e.log.Count() == before {
+		return nil // nothing to delete; leave the disk untouched
 	}
 	return p.rewriteLocked(sessionID, e)
 }
 
-// Clear 清空会话并删除落盘文件
+// Clear empties the session and deletes its on-disk files (including
+// the summary file).
 //
-// 删文件与进行中的追加同锁串行，否则清空后被追加重建
+// Deleting files is serialized under the same lock as in-flight
+// appends; otherwise a concurrent append after the clear would
+// recreate the session.
 func (p *Persistent) Clear(_ context.Context, sessionID string) error {
 	if !validSessionID(sessionID) {
 		return fmt.Errorf("invalid session id %q", sessionID)
@@ -179,23 +205,93 @@ func (p *Persistent) Clear(_ context.Context, sessionID string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.sessions, sessionID)
-	err := os.Remove(p.sessionPath(sessionID))
-	if err != nil && !os.IsNotExist(err) {
-		return err
+	for _, path := range []string{p.sessionPath(sessionID), p.summaryPath(sessionID)} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	return nil
 }
 
-// sessionPath 会话文件路径
-// returns: 目录内 <sessionID>.jsonl
+// sessionPath returns the session file path.
+// returns: <sessionID>.jsonl inside the directory.
 func (p *Persistent) sessionPath(sessionID string) string {
 	return filepath.Join(p.dir, sessionID+".jsonl")
 }
 
-// loadLocked 取会话驻留态，未驻留则从盘读入
+// summaryPath returns the session summary file path.
+// returns: <sessionID>.summary inside the directory.
+func (p *Persistent) summaryPath(sessionID string) string {
+	return filepath.Join(p.dir, sessionID+".summary")
+}
+
+// summaryRecord is the on-disk summary record: summary text + the
+// number of folded-in messages.
+type summaryRecord struct {
+	Covered int    `json:"covered"`
+	Text    string `json:"text"`
+}
+
+// SaveSummary persists the session summary, atomically replacing the
+// file via temp + rename.
 //
-// 调用方必须持有写锁（可能写 map 与触发 LRU 卸载）
-// returns: 该会话的驻留态，文件不存在或不可读时为空会话
+// The summary is the only copy of the old context in compact mode, so
+// persisting it must be atomic: if the process crashes mid-write the
+// file is either the old summary or the new one — a half-written
+// state is impossible.
+func (p *Persistent) SaveSummary(_ context.Context, sessionID string, covered int, text string) error {
+	if !validSessionID(sessionID) {
+		return fmt.Errorf("invalid session id %q", sessionID)
+	}
+	line, err := json.Marshal(summaryRecord{Covered: covered, Text: text})
+	if err != nil {
+		return fmt.Errorf("encode summary: %w", err)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	path := p.summaryPath(sessionID)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(line, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write summary temp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return fmt.Errorf("swap summary file: %w", err)
+	}
+	return nil
+}
+
+// LoadSummary reads back the session summary; a missing or corrupt
+// file is treated as "no summary".
+//
+// It returns ("", 0, nil): the Summary layer uses that to take the
+// "no cache" path and re-compress, so the worst degradation from a
+// corrupt summary is one redundant LLM call — the session is not
+// interrupted.
+func (p *Persistent) LoadSummary(_ context.Context, sessionID string) (string, int, error) {
+	if !validSessionID(sessionID) {
+		return "", 0, fmt.Errorf("invalid session id %q", sessionID)
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	data, err := os.ReadFile(p.summaryPath(sessionID))
+	if err != nil {
+		return "", 0, nil // missing/unreadable are both treated as no summary
+	}
+	var rec summaryRecord
+	if json.Unmarshal(data, &rec) != nil || rec.Text == "" {
+		return "", 0, nil
+	}
+	return rec.Text, rec.Covered, nil
+}
+
+// loadLocked returns the session's resident state, reading it from
+// disk if not yet resident.
+//
+// The caller must hold the write lock (it may write to the map and
+// trigger LRU unloading).
+// returns: the session's resident state; an empty session if the file
+// does not exist or is unreadable.
 func (p *Persistent) loadLocked(sessionID string) *pEntry {
 	if e, ok := p.sessions[sessionID]; ok {
 		e.lastUse = time.Now()
@@ -204,18 +300,21 @@ func (p *Persistent) loadLocked(sessionID string) *pEntry {
 	e := &pEntry{lastUse: time.Now()}
 	msgs, tss := loadSessionRecords(p.sessionPath(sessionID))
 	for i := range msgs {
-		e.log.add(p.counter, tss[i], msgs[i])
+		e.log.Add(p.counter, tss[i], msgs[i])
 	}
 	p.sessions[sessionID] = e
 	p.evictLocked(sessionID)
 	return e
 }
 
-// evictLocked 驻留数超上限时按 LRU 卸载最久未访问的会话
+// evictLocked unloads the least recently accessed sessions per LRU
+// when the resident count exceeds the cap.
 //
-// 只删内存条目不删盘（盘是数据源，随时可重读）；脏会话与当前
-// 会话不逐出——超限是性能问题，丢数据是正确性问题
-// exclude: 本次正在服务的会话
+// It only drops in-memory entries, never disk files (disk is the
+// source of truth and can be re-read at any time); dirty sessions and
+// the current session are never evicted — exceeding the cap is a
+// performance issue, losing data is a correctness issue.
+// exclude: the session currently being served.
 func (p *Persistent) evictLocked(exclude string) {
 	if p.maxLoaded <= 0 {
 		return
@@ -232,13 +331,13 @@ func (p *Persistent) evictLocked(exclude string) {
 			}
 		}
 		if victim == "" {
-			return // 全是脏会话/当前会话，宁可超限
+			return // all dirty/current sessions; prefer exceeding the cap
 		}
 		delete(p.sessions, victim)
 	}
 }
 
-// appendDisk 追加写会话文件
+// appendDisk appends to the session file.
 func (p *Persistent) appendDisk(sessionID string, msgs []core.Message, now time.Time) error {
 	f, err := os.OpenFile(p.sessionPath(sessionID), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -258,10 +357,12 @@ func (p *Persistent) appendDisk(sessionID string, msgs []core.Message, now time.
 	return w.Flush()
 }
 
-// rewriteLocked 全量重写会话文件（temp + rename 原子替换）
+// rewriteLocked fully rewrites the session file (atomic replacement
+// via temp + rename).
 //
-// Trim 物理压缩后调用；重写成功同时清除脏标记——盘上已含全部
-// 内存内容，LRU 恢复逐出资格
+// Called after Trim physically compacts the log; a successful rewrite
+// also clears the dirty flag — the disk now contains all in-memory
+// content, and the session regains LRU eviction eligibility.
 func (p *Persistent) rewriteLocked(sessionID string, e *pEntry) error {
 	path := p.sessionPath(sessionID)
 	tmp := path + ".tmp"
@@ -270,8 +371,8 @@ func (p *Persistent) rewriteLocked(sessionID string, e *pEntry) error {
 		return fmt.Errorf("open rewrite temp: %w", err)
 	}
 	w := bufio.NewWriter(f)
-	for i, m := range e.log.msgs {
-		line, err := json.Marshal(diskRecord{TS: e.log.tss[i], Msg: m})
+	for i, m := range e.log.Msgs {
+		line, err := json.Marshal(diskRecord{TS: e.log.Tss[i], Msg: m})
 		if err != nil {
 			f.Close()
 			os.Remove(tmp)
@@ -288,7 +389,8 @@ func (p *Persistent) rewriteLocked(sessionID string, e *pEntry) error {
 		os.Remove(tmp)
 		return fmt.Errorf("flush rewrite temp: %w", err)
 	}
-	// Windows 上 rename 前必须关句柄，否则目标文件被占用
+	// On Windows the handle must be closed before rename, otherwise
+	// the target file is locked.
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("close rewrite temp: %w", err)
@@ -301,15 +403,17 @@ func (p *Persistent) rewriteLocked(sessionID string, e *pEntry) error {
 	return nil
 }
 
-// loadSessionRecords 读取单个会话文件，坏行与超长行跳过
+// loadSessionRecords reads a single session file, skipping corrupt
+// and oversized lines.
 //
-// 每行先按 diskRecord 解（新格式），msg 角色为空再按裸 core.Message
-// 解（旧格式）；两层都失败按坏行丢弃
-// returns: 恢复的消息列表与对齐的入栈时间
+// Each line is first decoded as diskRecord (new format); if the msg
+// role is empty it is retried as a bare core.Message (old format);
+// failing both layers the line is discarded as corrupt.
+// returns: the recovered message list and aligned push times.
 func loadSessionRecords(path string) (msgs []core.Message, tss []time.Time) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil // 文件不存在 = 空会话；其他读错误与旧 loadAll 一致按空处理
+		return nil, nil // file missing = empty session; other read errors are treated as empty, matching the old loadAll
 	}
 	defer f.Close()
 	r := bufio.NewReaderSize(f, 64*1024)
@@ -334,20 +438,26 @@ func loadSessionRecords(path string) (msgs []core.Message, tss []time.Time) {
 	}
 }
 
-// readLineLimited 读一行并施加长度上限
+// readLineLimited reads one line under a length limit.
 //
-// 一旦累计长度（含换行符）严格超过 limit 即进入丢弃模式：整行作废，
-// 持续消费到换行才返回 nil，保证后续行仍可继续读取；恰好等于 limit
-// 的行视为合法整行保留。旧实现重置后继续累积，会把超长行的尾部
-// 当成独立行吐出去，毒行内容混进恢复结果
-// returns: 行内容（不含换行，超长行恒为 nil）、读取错误（io.EOF 表示文件结束）
+// As soon as the accumulated length (including the newline) strictly
+// exceeds the limit it enters discard mode: the whole line is voided
+// and input is consumed until the newline before returning nil,
+// guaranteeing subsequent lines remain readable; a line exactly equal
+// to the limit is kept as a valid whole line. The old implementation
+// kept accumulating after a reset, emitting the tail of an oversized
+// line as if it were an independent line, letting poison-line content
+// leak into the recovered result.
+// returns: the line content (without newline; always nil for
+// oversized lines) and the read error (io.EOF means end of file).
 func readLineLimited(r *bufio.Reader, limit int) ([]byte, error) {
 	var buf []byte
 	overflow := false
 	for {
 		chunk, err := r.ReadSlice('\n')
 		if !overflow && len(buf)+len(chunk) > limit {
-			// 刚超限：已累计内容全部作废，切到丢弃模式消费到行尾
+			// Just exceeded the limit: void everything accumulated
+			// so far and switch to discard mode until end of line.
 			overflow = true
 			buf = nil
 		}
@@ -357,7 +467,7 @@ func readLineLimited(r *bufio.Reader, limit int) ([]byte, error) {
 		if err == bufio.ErrBufferFull {
 			continue
 		}
-		// err 为 nil（含换行）或 io.EOF：本行结束
+		// err is nil (newline included) or io.EOF: this line is done.
 		if overflow {
 			return nil, err
 		}
@@ -365,8 +475,8 @@ func readLineLimited(r *bufio.Reader, limit int) ([]byte, error) {
 	}
 }
 
-// trimNewline 去掉行尾换行符
-// returns: 处理后的行
+// trimNewline strips the trailing newline from a line.
+// returns: the processed line.
 func trimNewline(b []byte) []byte {
 	if n := len(b); n > 0 && b[n-1] == '\n' {
 		b = b[:n-1]

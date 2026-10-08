@@ -12,27 +12,35 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// ChatBody 对话请求体
+// ChatBody is the conversation request body.
+//
+// Exactly one of two modes applies:
+//   - Stateful: fill in only session_id + input; history is managed
+//     by the server-side memory.
+//   - Stateless: fill in messages (full history) + input; the server
+//     keeps no state, and the response carries new_messages so the
+//     caller can persist them and pass them back verbatim next round.
 type ChatBody struct {
-	SessionID    string `json:"session_id"`
-	ProviderID   string `json:"provider_id"`
-	Model        string `json:"model"`
-	Input        string `json:"input"`
-	Stream       bool   `json:"stream"`
-	SystemPrompt string `json:"system_prompt"`
+	SessionID    string         `json:"session_id"`
+	ProviderID   string         `json:"provider_id"`
+	Model        string         `json:"model"`
+	Input        string         `json:"input"`
+	Stream       bool           `json:"stream"`
+	SystemPrompt string         `json:"system_prompt"`
+	Messages     []core.Message `json:"messages,omitempty"`
 }
 
-// handleHealth 存活探针
+// handleHealth is the liveness probe.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// handleMetrics 输出运行指标快照
+// handleMetrics emits a snapshot of runtime metrics.
 func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.metrics.Snapshot())
 }
 
-// handleProviders 列出已注册提供商与模型
+// handleProviders lists registered providers and models.
 func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 	type modelView struct {
 		ID            string `json:"id"`
@@ -61,12 +69,14 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// maxChatBody 请求体上限
+// maxChatBody is the request body size cap.
 //
-// 端点无鉴权，不限长即可被灌入任意大 JSON 直到 OOM
+// The endpoint is unauthenticated; without a cap, arbitrarily large
+// JSON could be pushed in until OOM.
 const maxChatBody = 4 << 20
 
-// handleChat 对话入口，stream=true 时以 SSE 返回过程事件
+// handleChat is the conversation entry point; with stream=true it
+// returns process events over SSE.
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxChatBody)
 	var body ChatBody
@@ -78,7 +88,14 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "input is required"})
 		return
 	}
-	if body.SessionID == "" {
+	// Stateless mode: messages carries the full history and is
+	// mutually exclusive with session_id.
+	if len(body.Messages) > 0 {
+		if body.SessionID != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "session_id and messages are mutually exclusive"})
+			return
+		}
+	} else if body.SessionID == "" {
 		body.SessionID = "default"
 	}
 
@@ -98,6 +115,27 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Stateless non-streaming: no server-side state is kept;
+	// new_messages is handed back to the caller.
+	if len(body.Messages) > 0 {
+		loop := s.statelessLoop(llm, model, body.SystemPrompt, nil)
+		res, runErr := loop.RunWithHistory(r.Context(), body.Messages, body.Input)
+		s.metrics.Record(cfg.ID, res.Usage, runErr)
+		if runErr != nil && !errors.Is(runErr, agent.ErrMaxIterations) {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": runErr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mode":         "stateless",
+			"content":      res.Message.Content,
+			"reasoning":    res.Message.Reasoning,
+			"new_messages": res.NewMessages,
+			"usage":        res.Usage,
+			"cost_usd":     s.costOf(cfg, model, res.Usage),
+		})
+		return
+	}
+
 	loop := s.loop(llm, model, body.SystemPrompt, nil)
 	msg, usage, runErr := loop.Run(r.Context(), body.SessionID, body.Input)
 	s.metrics.Record(cfg.ID, usage, runErr)
@@ -114,9 +152,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// chatStream SSE 流式对话
+// chatStream is the SSE streaming conversation.
 //
-// 断连即取消：r.Context() 取消后循环内 LLM 调用与工具执行一并中断
+// Disconnect cancels: once r.Context() is canceled, both the LLM
+// calls and tool executions inside the loop are aborted.
 func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, cfg *provider.ProviderConfig, llm core.LLM, model string, body ChatBody) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -127,7 +166,8 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, cfg *provide
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	// 客户端断连时 r.Context() 取消；写入失败也要主动取消，避免循环空转
+	// r.Context() is canceled when the client disconnects; write
+	// failures must also cancel proactively so the loop does not spin idle.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -169,6 +209,27 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, cfg *provide
 		}
 	}
 
+	// Stateless streaming: process events are identical to the
+	// stateful path; the done event additionally carries new_messages.
+	if len(body.Messages) > 0 {
+		loop := s.statelessLoop(llm, model, body.SystemPrompt, onEvent)
+		res, runErr := loop.RunWithHistory(ctx, body.Messages, body.Input)
+		s.metrics.Record(cfg.ID, res.Usage, runErr)
+		status := "done"
+		if runErr != nil {
+			status = "error"
+		}
+		writeSSE(status, map[string]any{
+			"content":      res.Message.Content,
+			"reasoning":    res.Message.Reasoning,
+			"new_messages": res.NewMessages,
+			"usage":        res.Usage,
+			"cost_usd":     s.costOf(cfg, model, res.Usage),
+			"error":        errString(runErr),
+		})
+		return
+	}
+
 	loop := s.loop(llm, model, body.SystemPrompt, onEvent)
 	msg, usage, runErr := loop.Run(ctx, body.SessionID, body.Input)
 	s.metrics.Record(cfg.ID, usage, runErr)
@@ -186,8 +247,8 @@ func (s *Server) chatStream(w http.ResponseWriter, r *http.Request, cfg *provide
 	})
 }
 
-// costOf 按提供商定价估算成本
-// returns: 美元成本，模型未配置定价时为 0
+// costOf estimates cost from the provider's pricing.
+// returns: the cost in USD, or 0 if the model has no pricing configured.
 func (s *Server) costOf(cfg *provider.ProviderConfig, model string, usage core.Usage) float64 {
 	m, ok := cfg.Model(model)
 	if !ok {
@@ -196,15 +257,15 @@ func (s *Server) costOf(cfg *provider.ProviderConfig, model string, usage core.U
 	return m.CostOf(usage)
 }
 
-// writeJSON 输出 JSON 响应
+// writeJSON writes a JSON response.
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// errString 错误转字符串，nil 返回空串
-// returns: 错误信息
+// errString converts an error to a string; nil yields an empty string.
+// returns: the error message.
 func errString(err error) string {
 	if err == nil {
 		return ""

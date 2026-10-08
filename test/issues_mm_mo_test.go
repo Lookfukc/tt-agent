@@ -10,10 +10,11 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorytest"
 	"github.com/Lookfukc/tt-agent/pkg/orchestrator"
 )
 
-// TestM_M1SessionIDTraversalBlocked 会话 ID 路径穿越必须被拒
+// TestM_M1SessionIDTraversalBlocked verifies session-ID path traversal must be rejected
 func TestM_M1SessionIDTraversalBlocked(t *testing.T) {
 	p, err := memory.NewPersistent(t.TempDir(), nil)
 	if err != nil {
@@ -30,7 +31,7 @@ func TestM_M1SessionIDTraversalBlocked(t *testing.T) {
 	}
 }
 
-// TestM_M2PoisonLineSkipped 超长毒行不得阻断后续消息恢复
+// TestM_M2PoisonLineSkipped verifies an oversized poison line must not block recovery of subsequent messages
 func TestM_M2PoisonLineSkipped(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/s1.jsonl"
@@ -55,19 +56,19 @@ func TestM_M2PoisonLineSkipped(t *testing.T) {
 	}
 }
 
-// TestM_O2ResumeInterruptedRun 取消遗留的 running 运行可续跑
+// TestM_O2ResumeInterruptedRun verifies a run left in running state by cancellation can be resumed
 func TestM_O2ResumeInterruptedRun(t *testing.T) {
 	store, err := orchestrator.NewFileRunStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
 	o := orchestrator.New(store)
-	// 慢 agent：确保取消落在步骤执行中段而非两步之间
+	// Slow agent: ensures the cancellation lands mid-step rather than between steps
 	dummy := 0
 	slow := agent.NewLoop(&countingEchoLLM{delay: 300 * time.Millisecond, calls: &dummy},
-		nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	o.RegisterAgent("writer", slow)
-	o.RegisterAgent("reviewer", agent.NewLoop(echoLLM{}, nil, memory.NewBuffer(nil), agent.Config{Model: "m"}))
+	o.RegisterAgent("reviewer", agent.NewLoop(echoLLM{}, nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"}))
 	_ = o.RegisterWorkflow(&orchestrator.Workflow{
 		Name: "review",
 		Steps: []orchestrator.Step{
@@ -89,7 +90,7 @@ func TestM_O2ResumeInterruptedRun(t *testing.T) {
 		t.Fatalf("M-O2: interrupted run status = %s, want running (failed would lock out Resume)", run.Status)
 	}
 
-	// 旧实现只接受 waiting，中断的 run 永久卡死；现在可从当前步重跑
+	// The old implementation only accepted waiting, so interrupted runs were stuck forever; now they can rerun from the current step
 	resumed, err := o.Resume(context.Background(), run.ID, "")
 	if err != nil {
 		t.Fatalf("M-O2: Resume interrupted run: %v", err)
@@ -99,10 +100,10 @@ func TestM_O2ResumeInterruptedRun(t *testing.T) {
 	}
 }
 
-// TestM_A1LoopEventCarriesSession 事件必须携带会话标识
+// TestM_A1LoopEventCarriesSession verifies events must carry the session identifier
 func TestM_A1LoopEventCarriesSession(t *testing.T) {
 	var sessions []string
-	loop := agent.NewLoop(echoLLM{}, nil, memory.NewBuffer(nil), agent.Config{
+	loop := agent.NewLoop(echoLLM{}, nil, memorytest.NewBuffer(nil), agent.Config{
 		Model: "m",
 		OnEvent: func(e agent.LoopEvent) {
 			if e.SessionID != "" && e.Type == agent.EventDone {
@@ -121,20 +122,20 @@ func TestM_A1LoopEventCarriesSession(t *testing.T) {
 	}
 }
 
-// TestM_O1ConcurrentResumeSingleExecution 并发 Resume 只执行一份
+// TestM_O1ConcurrentResumeSingleExecution verifies concurrent Resume executes only one copy
 func TestM_O1ConcurrentResumeSingleExecution(t *testing.T) {
 	store, _ := orchestrator.NewFileRunStore(t.TempDir())
 	o := orchestrator.New(store)
 	calls := 0
 	slow := agent.NewLoop(&countingEchoLLM{delay: 150 * time.Millisecond, calls: &calls},
-		nil, memory.NewBuffer(nil), agent.Config{Model: "m"})
+		nil, memorytest.NewBuffer(nil), agent.Config{Model: "m"})
 	o.RegisterAgent("worker", slow)
 	_ = o.RegisterWorkflow(&orchestrator.Workflow{
 		Name:  "w",
 		Steps: []orchestrator.Step{orchestrator.AgentStep{Agent: "worker", Input: "$input"}},
 	})
 
-	// 取消制造 running 中断态（步骤执行中取消）
+	// Cancel to create an interrupted running state (cancelled mid-step)
 	cctx, ccancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(30 * time.Millisecond)
@@ -145,7 +146,7 @@ func TestM_O1ConcurrentResumeSingleExecution(t *testing.T) {
 		t.Fatalf("setup failed: %+v", run)
 	}
 
-	// 两个并发 Resume：只有一个应拿到执行权，另一个排队后看到终态
+	// Two concurrent Resumes: only one should acquire execution; the other, after queuing, sees a terminal state
 	done := make(chan error, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
@@ -165,18 +166,18 @@ func TestM_O1ConcurrentResumeSingleExecution(t *testing.T) {
 	}
 }
 
-// countingEchoLLM 计数并延时的 echo 模型
+// countingEchoLLM is an echo model that counts and delays
 type countingEchoLLM struct {
 	delay time.Duration
 	calls *int
 }
 
-// Chat 未使用
+// Chat is unused
 func (c *countingEchoLLM) Chat(_ context.Context, _ core.ChatRequest) (*core.ChatResponse, error) {
 	return nil, nil
 }
 
-// ChatStream 延时后回显
+// ChatStream echoes after a delay
 func (c *countingEchoLLM) ChatStream(ctx context.Context, req core.ChatRequest) (<-chan core.StreamEvent, error) {
 	var input string
 	for _, m := range req.Messages {
@@ -193,7 +194,7 @@ func (c *countingEchoLLM) ChatStream(ctx context.Context, req core.ChatRequest) 
 			events <- core.StreamEvent{Type: core.StreamError, Err: ctx.Err()}
 			return
 		}
-		// 只计真实产出的响应，被取消的尝试不计
+		// Only count responses actually produced; cancelled attempts don't count
 		*c.calls++
 		events <- core.StreamEvent{Type: core.StreamStart}
 		events <- core.StreamEvent{Type: core.StreamDeltaText, Text: "echo:" + input}
@@ -202,8 +203,8 @@ func (c *countingEchoLLM) ChatStream(ctx context.Context, req core.ChatRequest) 
 	return events, nil
 }
 
-// writeFile 测试辅助写文件
-// returns: 错误
+// writeFile is a test helper that writes a file
+// returns: error
 func writeFile(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o644)
 }

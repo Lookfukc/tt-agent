@@ -13,10 +13,11 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// probeBody 起一个捕获请求体的服务并返回固定响应
+// probeBody starts an HTTP server that captures the request body and replies with a fixed response.
 //
-// 必须预分配 map：闭包内 Unmarshal 到 nil map 会分配新 map，
-// 只更新闭包变量，调用方拿到的仍是 nil
+// The map must be pre-allocated: unmarshaling into a nil map inside the
+// closure would allocate a fresh map visible only to the closure, leaving
+// the caller with nil
 func probeBody(t *testing.T, reply string) (map[string]any, *httptest.Server) {
 	t.Helper()
 	got := make(map[string]any)

@@ -14,81 +14,91 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// maxFetchBytes 响应体上限，超长截断防记忆爆窗
+// maxFetchBytes is the response body limit; oversized bodies are truncated
+// to prevent memory blowups.
 const maxFetchBytes = 64 * 1024
 
-// maxRedirects 重定向跳数上限
+// maxRedirects is the maximum number of redirect hops.
 const maxRedirects = 5
 
-// Clock 返回当前时间
+// Clock returns the current time.
 type Clock struct{}
 
-// NewClock 构造时钟工具
-// returns: 可注册的工具实例
+// NewClock constructs the clock tool.
+// returns: a registrable tool instance
 func NewClock() *Clock { return &Clock{} }
 
-// Name 工具名
+// Name returns the tool name.
 func (Clock) Name() string { return "clock" }
 
-// Description 工具描述
+// Description returns the tool description.
 func (Clock) Description() string { return "获取当前日期时间，格式 RFC3339" }
 
-// Parameters 参数 schema
+// Parameters returns the parameter schema.
 func (Clock) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{}}`)
 }
 
-// Execute 返回当前时间
+// Execute returns the current time.
 func (Clock) Execute(_ context.Context, _ json.RawMessage) (core.ToolResult, error) {
 	now := time.Now().Format(time.RFC3339)
 	return core.ToolResult{Data: map[string]any{"now": now}}, nil
 }
 
-// HTTPFetch 抓取 URL 文本内容
+// HTTPFetch fetches the text content of a URL.
 //
-// 默认拒绝环回/私网/链路本地目标：该工具面向模型输出，无过滤即
-// SSRF，可被引导抓取云元数据端点。重定向手动逐跳跟随，且私网
-// 校验在拨号期强制执行（防 DNS rebinding TOCTOU），两层校验
-// 均受 AllowPrivateNetwork 开关控制
+// Loopback/private/link-local targets are rejected by default: this tool
+// faces model output, and without filtering it is an SSRF vector that can
+// be steered to fetch cloud metadata endpoints. Redirects are followed
+// manually hop by hop, and the private-network check is enforced at dial
+// time (defending against DNS rebinding TOCTOU); both layers of checking
+// are governed by the AllowPrivateNetwork switch.
 type HTTPFetch struct {
 	client *http.Client
-	// AllowPrivateNetwork 显式放行内网目标（自托管内网场景）
+	// AllowPrivateNetwork explicitly permits intranet targets
+	// (self-hosted intranet scenarios)
 	AllowPrivateNetwork bool
 }
 
-// NewHTTPFetch 构造抓取工具，默认启用私网过滤
-// returns: 可注册的工具实例
+// NewHTTPFetch constructs the fetch tool with private-network filtering
+// enabled by default.
+// returns: a registrable tool instance
 func NewHTTPFetch() *HTTPFetch {
 	return NewHTTPFetchWithOptions()
 }
 
-// HTTPOption HTTPFetch 功能选项
+// HTTPOption is a functional option for HTTPFetch.
 type HTTPOption func(*HTTPFetch)
 
-// WithAllowPrivateTargets 放行环回/私网目标（自托管内网场景）
+// WithAllowPrivateTargets permits loopback/private targets (self-hosted
+// intranet scenarios).
 //
-// 生产默认必须保持严格（false），放行仅用于内网部署与本地测试
+// The production default must stay strict (false); allowing is only for
+// intranet deployments and local testing.
 func WithAllowPrivateTargets(allow bool) HTTPOption {
 	return func(f *HTTPFetch) { f.AllowPrivateNetwork = allow }
 }
 
-// NewHTTPFetchWithOptions 按选项构造抓取工具
-// opts: 功能选项，见 WithAllowPrivateTargets
-// returns: 可注册的工具实例
+// NewHTTPFetchWithOptions constructs the fetch tool per the options.
+// opts: functional options, see WithAllowPrivateTargets
+// returns: a registrable tool instance
 func NewHTTPFetchWithOptions(opts ...HTTPOption) *HTTPFetch {
 	f := &HTTPFetch{
 		client: &http.Client{
 			Timeout: 15 * time.Second,
-			// 重定向手动跟随：每一跳都要重新过 IP 校验
+			// Redirects are followed manually: every hop must re-pass
+			// IP validation
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
 	}
-	// 私网过滤的权威执行点在拨号期（见 dialChecked），而非请求前的
-	// 一次性 DNS 解析：两次解析之间的 DNS 切换即 rebinding TOCTOU。
-	// 不挂 ProxyFromEnvironment：经代理时拨号目标是代理而非 URL 主机，
-	// 私网校验会被整体绕过
+	// The authoritative enforcement point for private-network filtering is
+	// at dial time (see dialChecked), not a one-shot DNS resolution before
+	// the request: a DNS switch between the two resolutions is exactly the
+	// rebinding TOCTOU. ProxyFromEnvironment is deliberately not set: when
+	// going through a proxy the dial target is the proxy rather than the
+	// URL host, and private-network validation would be bypassed entirely
 	f.client.Transport = &http.Transport{DialContext: f.dialChecked}
 	for _, opt := range opts {
 		opt(f)
@@ -96,21 +106,21 @@ func NewHTTPFetchWithOptions(opts ...HTTPOption) *HTTPFetch {
 	return f
 }
 
-// Name 工具名
+// Name returns the tool name.
 func (HTTPFetch) Name() string { return "http_fetch" }
 
-// Description 工具描述
+// Description returns the tool description.
 func (HTTPFetch) Description() string {
 	return "发起 HTTP GET 请求并返回文本响应体，适合抓取网页或 API 文本内容"
 }
 
-// Parameters 参数 schema
+// Parameters returns the parameter schema.
 func (HTTPFetch) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object","properties":{"url":{"type":"string","description":"完整 URL"}},"required":["url"]}`)
 }
 
-// Execute 抓取 URL
-// returns: 截断后的文本内容
+// Execute fetches the URL.
+// returns: the truncated text content
 func (f *HTTPFetch) Execute(ctx context.Context, args json.RawMessage) (core.ToolResult, error) {
 	var in struct {
 		URL string `json:"url"`
@@ -175,10 +185,11 @@ func (f *HTTPFetch) Execute(ctx context.Context, args json.RawMessage) (core.Too
 	}}, nil
 }
 
-// checkTarget 请求前的快速失败校验
+// checkTarget is a fail-fast check before the request.
 //
-// 权威校验在 dialChecked（拨号期），此处只为给出即时错误信息，
-// 避免 IP 字面量目标还要先建连接才被拒
+// The authoritative check lives in dialChecked (at dial time); this exists
+// only to produce an immediate error message, so that IP-literal targets
+// are not rejected only after a connection is established.
 func (f *HTTPFetch) checkTarget(ctx context.Context, rawURL string) error {
 	if f.AllowPrivateNetwork {
 		return nil
@@ -193,7 +204,8 @@ func (f *HTTPFetch) checkTarget(ctx context.Context, rawURL string) error {
 		}
 		return nil
 	}
-	// 域名逐条解析 A/AAAA，全部地址都放行才放行
+	// Resolve A/AAAA records for the domain; allow only if every address
+	// is allowed
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", host, err)
@@ -206,13 +218,16 @@ func (f *HTTPFetch) checkTarget(ctx context.Context, rawURL string) error {
 	return nil
 }
 
-// dialChecked 拨号期私网校验，关闭 DNS rebinding TOCTOU 窗口
+// dialChecked is the dial-time private-network check, closing the DNS
+// rebinding TOCTOU window.
 //
-// checkTarget 的解析结果与真正拨号之间 DNS 记录可能被切换
-// （rebinding 攻击），因此校验权威在此：域名的每条解析结果都必须
-// 放行，随后钉扎首个合法 IP 直接拨号，绕开 http.Transport 的二次
-// 解析。只改拨号地址、不动 URL，TLS 仍按 URL 主机名做 SNI 与
-// 证书校验
+// DNS records may be switched between checkTarget's resolution and the
+// actual dial (a rebinding attack), hence the authoritative check lives
+// here: every resolved address of the domain must be allowed, then the
+// first legal IP is pinned and dialed directly, bypassing http.Transport's
+// second resolution. Only the dial address is changed; the URL is
+// untouched, so TLS still performs SNI and certificate validation against
+// the URL hostname.
 func (f *HTTPFetch) dialChecked(ctx context.Context, network, addr string) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	if f.AllowPrivateNetwork {
@@ -228,8 +243,9 @@ func (f *HTTPFetch) dialChecked(ctx context.Context, network, addr string) (net.
 		if err != nil {
 			return nil, fmt.Errorf("httpfetch: resolve %s: %w", host, err)
 		}
-		// 任一解析结果命中私网段即整体拒绝：rebinding 常用 TTL 极短
-		// 的公网/私网交替记录混过抽检
+		// Reject as a whole if any resolved address hits a private range:
+		// rebinding commonly uses alternating public/private records with
+		// extremely short TTLs to slip past spot checks
 		for _, a := range addrs {
 			if !a.IP.IsGlobalUnicast() || isPrivateIP(a.IP) {
 				return nil, fmt.Errorf("httpfetch: blocked non-public target %s (%s)", host, a.IP)
@@ -246,10 +262,10 @@ func (f *HTTPFetch) dialChecked(ctx context.Context, network, addr string) (net.
 	return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 }
 
-// isPrivateIP 判定私有/特殊网段
+// isPrivateIP determines private/special network ranges.
 //
-// IsGlobalUnicast 已覆盖多数，但拨号 VPN 常见的 100.64/10 段
-// 与 IsGlobalUnicast 交集需要单独排除
+// IsGlobalUnicast already covers most, but the 100.64/10 range common in
+// dial-up VPNs intersects IsGlobalUnicast and must be excluded separately.
 func isPrivateIP(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 		ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
@@ -262,7 +278,7 @@ func isPrivateIP(ip net.IP) bool {
 	return false
 }
 
-// hostOf 提取 URL 的主机部分（去掉端口）
+// hostOf extracts the host part of a URL (port stripped).
 func hostOf(rawURL string) string {
 	s := rawURL
 	if i := strings.Index(s, "://"); i >= 0 {
@@ -274,7 +290,7 @@ func hostOf(rawURL string) string {
 	if i := strings.LastIndex(s, "@"); i >= 0 {
 		s = s[i+1:]
 	}
-	// 去端口，但不动 IPv6 字面量的冒号
+	// Strip the port, but leave IPv6 literal colons untouched
 	if strings.HasPrefix(s, "[") {
 		if i := strings.Index(s, "]"); i >= 0 {
 			return strings.Trim(s[1:i], "[]")
@@ -286,12 +302,13 @@ func hostOf(rawURL string) string {
 	return s
 }
 
-// resolveLocation 按 RFC 3986 解析重定向目标为绝对 URL
+// resolveLocation resolves a redirect target into an absolute URL per
+// RFC 3986.
 //
-// Location 可能是绝对 URL、绝对路径、相对路径或 "../" 形式，
-// 手工拼 scheme+host+location 会漏掉无前导斜杠的相对路径，
-// 必须用 URL 基准解析
-// returns: 绝对地址或错误
+// Location may be an absolute URL, an absolute path, a relative path, or
+// "../" form; hand-concatenating scheme+host+location misses relative
+// paths without a leading slash, so base-URL resolution must be used.
+// returns: the absolute address or an error
 func resolveLocation(base, location string) (string, error) {
 	b, err := url.Parse(base)
 	if err != nil {
@@ -308,7 +325,7 @@ func resolveLocation(base, location string) (string, error) {
 	return resolved.String(), nil
 }
 
-// isRedirect 判定重定向状态码
+// isRedirect determines whether a status code is a redirect.
 func isRedirect(code int) bool {
 	return code == 301 || code == 302 || code == 303 || code == 307 || code == 308
 }

@@ -12,19 +12,22 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/agent"
 )
 
-// handleChatWS WebSocket 对话入口
+// handleChatWS is the WebSocket conversation entry point.
 //
-// 每条入站文本帧是一次独立对话请求，事件以 JSON 文本帧回推；
-// 连接级取消：读 goroutine 检测断连即 cancel 会话 ctx，
-// 进行中的循环与工具执行随之中断，不为断连客户端继续烧 token
+// Each inbound text frame is an independent conversation request, and
+// events are pushed back as JSON text frames;
+// connection-level cancellation: the read goroutine cancels the session
+// ctx as soon as it detects a disconnect, aborting any in-flight loop
+// and tool execution, so no tokens are burned for a disconnected client.
 func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request) {
 	if !wsHeaderContains(r.Header.Get("Connection"), "upgrade") ||
 		!strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "websocket upgrade required"})
 		return
 	}
-	// 浏览器跨站 WS 不受 CORS 约束：Origin 存在时必须与 Host 同源，
-	// 无 Origin 的非浏览器客户端放行
+	// Browser cross-site WS is not subject to CORS: when Origin is
+	// present it must be same-origin with Host;
+	// non-browser clients without an Origin header are allowed through.
 	if origin := r.Header.Get("Origin"); origin != "" {
 		if u, err := url.Parse(origin); err != nil || !strings.EqualFold(u.Host, r.Host) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "origin not allowed"})
@@ -40,7 +43,8 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	// 劫持后 HTTP 语义结束，读写都走裸连接
+	// After the hijack, HTTP semantics are over; reads and writes
+	// both go over the raw connection.
 	ws, err := wsUpgrade(conn, bufio.NewReader(brw.Reader), r.Header.Get("Sec-WebSocket-Key"))
 	if err != nil {
 		_ = conn.Close()
@@ -50,14 +54,18 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request) {
 	s.trackWS(ws)
 	defer s.untrackWS(ws)
 
-	// 会话 ctx 由读 goroutine 驱动：任何读错误（含断连、协议违规、
-	// 读窗口超时）都会取消它，进而取消正在执行的循环
+	// The session ctx is driven by the read goroutine: any read error
+	// (including disconnect, protocol violation, or read-window
+	// timeout) cancels it, which in turn cancels the running loop.
 	connCtx, cancelConn := context.WithCancel(context.Background())
 	defer cancelConn()
 
-	// N12 保活：空闲连接周期发 ping，客户端任何帧（含 pong）都会
-	// 刷新 2 分钟读窗口，活跃连接不再被窗口误杀；死连接由窗口兜底
-	// 掐断；connCtx 取消时 goroutine 自行退出，不泄漏
+	// N12 keepalive: idle connections send pings periodically; any
+	// client frame (including pong) refreshes the 2-minute read
+	// window, so active connections are never killed by the window
+	// in error; dead connections are cut off by the window as a
+	// fallback; when connCtx is canceled the goroutine exits by
+	// itself, so nothing leaks.
 	go ws.keepalive(connCtx, cancelConn)
 
 	type inbound struct {
@@ -70,7 +78,8 @@ func (s *Server) handleChatWS(w http.ResponseWriter, r *http.Request) {
 		for {
 			op, payload, err := ws.ReadMessage()
 			if err != nil {
-				// 分片累计超限按协议回 1009，未掩码帧回 1002
+				// Fragment accumulation over the limit gets a 1009
+				// reply per protocol; unmasked frames get 1002.
 				if errors.Is(err, wsErrMessageTooBig) {
 					_ = ws.WriteCloseStatus(1009)
 				} else if errors.Is(err, wsErrProtocol) {

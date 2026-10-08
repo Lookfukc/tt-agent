@@ -10,26 +10,27 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// anthropicStreamEvent 流事件载荷
+// anthropicStreamEvent is the stream event payload.
 //
-// delta 字段在不同事件类型下结构不同（增量 vs 终止原因），
-// 合并为一个宽松结构按需取值
+// The delta field has different structures under different event types
+// (increment vs finish reason), so they are merged into one loose struct
+// and read as needed.
 type anthropicStreamEvent struct {
 	Type string `json:"type"`
 
-	// message_start 的初始 usage
+	// Message holds the initial usage from message_start.
 	Message struct {
 		Usage anthropicUsage `json:"usage"`
 	} `json:"message"`
 
-	// content_block_start 的块元信息
+	// Index and ContentBlock carry block metadata from content_block_start.
 	Index        int            `json:"index"`
 	ContentBlock anthropicBlock `json:"content_block"`
 
-	// content_block_delta 与 message_delta 共用的 delta 载荷
+	// Delta is the delta payload shared by content_block_delta and message_delta.
 	Delta anthropicDelta `json:"delta"`
 
-	// message_delta 的累计输出用量
+	// Usage is the cumulative output usage from message_delta.
 	Usage anthropicUsage `json:"usage"`
 
 	Error *struct {
@@ -37,21 +38,22 @@ type anthropicStreamEvent struct {
 	} `json:"error"`
 }
 
-// anthropicDelta delta 载荷的并集结构
+// anthropicDelta is the union struct of delta payloads.
 type anthropicDelta struct {
 	Type string `json:"type"`
 	Text string `json:"text"`
-	// Thinking thinking_delta 内容
+	// Thinking is the thinking_delta content.
 	Thinking string `json:"thinking"`
-	// PartialJSON input_json_delta 的参数片段
+	// PartialJSON is the argument fragment from input_json_delta.
 	PartialJSON string `json:"partial_json"`
-	// StopReason message_delta 的终止原因
+	// StopReason is the finish reason from message_delta.
 	StopReason string `json:"stop_reason"`
 }
 
-// ChatStream 发送流式对话请求
+// ChatStream sends a streaming chat request.
 //
-// 首事件前的错误同步返回；建立连接后错误走 StreamError 事件
+// Errors before the first event are returned synchronously; after the
+// connection is established, errors surface as StreamError events.
 func (p *AnthropicProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (<-chan core.StreamEvent, error) {
 	body, err := p.buildBody(req, true)
 	if err != nil {
@@ -70,7 +72,8 @@ func (p *AnthropicProtocol) ChatStream(ctx context.Context, req core.ChatRequest
 	events := make(chan core.StreamEvent, 16)
 	go func() {
 		defer close(events)
-		// 泄漏防线：流读尽后必须关闭响应体，否则每次调用漏一个连接
+		// Leak guard: the response body must be closed once the stream is drained,
+		// otherwise every call leaks one connection.
 		defer resp.Body.Close()
 		d := &anthropicStreamDecoder{reader: newSSEReader(resp, false)}
 		emit := func(e core.StreamEvent) bool {
@@ -78,8 +81,9 @@ func (p *AnthropicProtocol) ChatStream(ctx context.Context, req core.ChatRequest
 			case events <- e:
 				return true
 			case <-ctx.Done():
-				// 契约：取消也必须发终止错误事件，静默关闭会让
-				// 半截内容被当成完整回答返回
+				// Contract: cancellation must also emit a terminal error event;
+				// closing silently would let truncated content be returned as a
+				// complete answer.
 				select {
 				case events <- core.StreamEvent{
 					Type: core.StreamError,
@@ -111,7 +115,7 @@ func (p *AnthropicProtocol) ChatStream(ctx context.Context, req core.ChatRequest
 	return events, nil
 }
 
-// emitEvent 转换单个流事件，返回 false 表示消费端已取消
+// emitEvent converts a single stream event; returning false means the consumer has cancelled.
 func (p *AnthropicProtocol) emitEvent(ev *anthropicStreamEvent, emit func(core.StreamEvent) bool) bool {
 	switch ev.Type {
 	case "error":
@@ -125,14 +129,14 @@ func (p *AnthropicProtocol) emitEvent(ev *anthropicStreamEvent, emit func(core.S
 			Usage: core.Usage{InputTokens: ev.Message.Usage.InputTokens},
 		})
 	case "message_delta":
-		// 终止原因已在 decoder 记录，此处只透传累计输出用量
+		// The finish reason was already recorded by the decoder; only pass through the cumulative output usage here.
 		return emit(core.StreamEvent{
 			Type:  core.StreamUsage,
 			Usage: core.Usage{OutputTokens: ev.Usage.OutputTokens},
 		})
 	case "content_block_start":
 		if ev.ContentBlock.Type == "tool_use" {
-			// 块起点携带完整 id/name，参数随后以 input_json_delta 到达
+			// The block start carries the full id/name; arguments arrive afterwards via input_json_delta.
 			return emit(core.StreamEvent{
 				Type: core.StreamDeltaToolCall,
 				ToolCallDelta: core.ToolCallDelta{
@@ -158,15 +162,15 @@ func (p *AnthropicProtocol) emitEvent(ev *anthropicStreamEvent, emit func(core.S
 	return true
 }
 
-// anthropicStreamDecoder Anthropic 流解码器
+// anthropicStreamDecoder is the Anthropic stream decoder.
 type anthropicStreamDecoder struct {
 	reader *sseReader
-	// finish message_delta 记录的终止原因，随 Done 事件发出
+	// finish is the finish reason recorded from message_delta, emitted with the Done event.
 	finish core.FinishReason
 }
 
-// next 读取下一个事件，message_delta 顺带记录终止原因
-// returns: 解码后的事件；done 为 true 表示 message_stop
+// next reads the next event, recording the finish reason from message_delta along the way.
+// returns: the decoded event; done is true for message_stop.
 func (d *anthropicStreamDecoder) next(ctx context.Context) (*anthropicStreamEvent, bool, error) {
 	for {
 		data, _, err := d.reader.next(ctx)

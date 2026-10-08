@@ -16,17 +16,18 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// TestRound2N5CancelDuringStalledScan 阻塞读中被取消必须归类为不可重试的取消
+// TestRound2N5CancelDuringStalledScan: cancellation during a blocked read must be classified as non-retryable cancellation
 //
-// 原 bug：取消在 Scan 内部浮出为 body 读错误，被包装成可重试的
-// ErrNetwork，重试逻辑会拿着已取消的 ctx 反复重放同一请求
+// Original bug: cancellation surfaced inside Scan as a body-read error, got
+// wrapped as retryable ErrNetwork, and the retry logic kept replaying the same
+// request with an already-cancelled ctx
 func TestRound2N5CancelDuringStalledScan(t *testing.T) {
 	release := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"前半\"}}]}\n\n")
 		w.(http.Flusher).Flush()
-		<-release // 服务端卡住后半段，制造阻塞读
+		<-release // Server blocks on the second half, creating a blocked read
 	}))
 	defer srv.Close()
 	defer close(release)
@@ -71,10 +72,10 @@ collect:
 	}
 }
 
-// TestRound2LP2ErrTooLongIdentifiable 超长行错误须可被 errors.Is 程序化识别
+// TestRound2LP2ErrTooLongIdentifiable: the overlong-line error must be programmatically identifiable via errors.Is
 //
-// 原 bug：错误消息只用 %v 拼接，调用方无法把 bufio.ErrTooLong
-// 从泛化的网络错误里区分出来
+// Original bug: the error message was only joined with %v, so callers could not
+// distinguish bufio.ErrTooLong from a generic network error
 func TestRound2LP2ErrTooLongIdentifiable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -96,9 +97,9 @@ func TestRound2LP2ErrTooLongIdentifiable(t *testing.T) {
 	}
 }
 
-// TestRound2N6AnthropicResponseFormatNonRetryable ResponseFormat 拒绝须为不可重试的 ErrUnsupported
+// TestRound2N6AnthropicResponseFormatNonRetryable: a ResponseFormat rejection must be non-retryable ErrUnsupported
 //
-// 原 bug：裸 fmt.Errorf 会被错误分类兜底成可重试网络错误
+// Original bug: a bare fmt.Errorf fell through error classification into a retryable network error
 func TestRound2N6AnthropicResponseFormatNonRetryable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{}`)
@@ -124,7 +125,7 @@ func TestRound2N6AnthropicResponseFormatNonRetryable(t *testing.T) {
 	}
 }
 
-// TestRound2N10GeminiStreamSameNameParallelCalls 流式同名并行调用的合成 ID 必须互异
+// TestRound2N10GeminiStreamSameNameParallelCalls verifies synthesized IDs of same-name parallel calls in streaming must be distinct
 func TestRound2N10GeminiStreamSameNameParallelCalls(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -158,7 +159,7 @@ func TestRound2N10GeminiStreamSameNameParallelCalls(t *testing.T) {
 	}
 }
 
-// TestRound2N10GeminiChatSameNameParallelCalls 非流式同名并行调用同样消歧
+// TestRound2N10GeminiChatSameNameParallelCalls verifies non-streaming same-name parallel calls are likewise disambiguated
 func TestRound2N10GeminiChatSameNameParallelCalls(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, `{"candidates":[{"content":{"parts":[`+
@@ -184,10 +185,10 @@ func TestRound2N10GeminiChatSameNameParallelCalls(t *testing.T) {
 	}
 }
 
-// TestRound2N10GeminiSynthesizedIDRoundTrip 新旧两种合成 ID 都要能还原工具名
+// TestRound2N10GeminiSynthesizedIDRoundTrip: both old and new synthesized ID forms must resolve back to the tool name
 //
-// 新格式 gemini:<name>:<序号> 与旧格式 gemini:<name> 同时回传时，
-// functionResponse 必须映射回正确的工具名
+// When the new format gemini:<name>:<index> and the old format gemini:<name>
+// are both sent back, functionResponse must map back to the correct tool name
 func TestRound2N10GeminiSynthesizedIDRoundTrip(t *testing.T) {
 	got, srv := probeBody(t, `{"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}]}`)
 	defer srv.Close()
@@ -223,10 +224,11 @@ func TestRound2N10GeminiSynthesizedIDRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRound2N11AnthropicThinkingDropsExtraTemperature Extra 注入的采样参数也必须清掉
+// TestRound2N11AnthropicThinkingDropsExtraTemperature: sampling parameters injected via Extra must also be cleared
 //
-// 原 bug：temperature 清理发生在 Extra 合并之前，Extra 里的同名
-// 字段会在思考开启时漏进请求体，Anthropic 直接 400
+// Original bug: temperature cleanup happened before the Extra merge, so a
+// same-named field in Extra leaked into the request body with thinking enabled,
+// and Anthropic returned 400 outright
 func TestRound2N11AnthropicThinkingDropsExtraTemperature(t *testing.T) {
 	got, srv := probeBody(t, `{"content":[{"type":"text","text":"ok"}]}`)
 	defer srv.Close()
@@ -250,9 +252,9 @@ func TestRound2N11AnthropicThinkingDropsExtraTemperature(t *testing.T) {
 	}
 }
 
-// TestRound2N11AnthropicThinkingMaxTokensGuard max_tokens 必须大于思考预算
+// TestRound2N11AnthropicThinkingMaxTokensGuard: max_tokens must exceed the thinking budget
 //
-// Anthropic 硬性要求 max_tokens > thinking.budget_tokens，违反直接 400
+// Anthropic hard-requires max_tokens > thinking.budget_tokens; violating it gets an immediate 400
 func TestRound2N11AnthropicThinkingMaxTokensGuard(t *testing.T) {
 	got, srv := probeBody(t, `{"content":[{"type":"text","text":"ok"}]}`)
 	defer srv.Close()

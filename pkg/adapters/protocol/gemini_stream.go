@@ -10,10 +10,10 @@ import (
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
 
-// ChatStream 发送流式对话请求
+// ChatStream sends a streaming chat request.
 //
-// Gemini 的 SSE 每行是一个完整响应片段而非增量，functionCall
-// 一次性出现在单个片段中
+// Gemini's SSE delivers each line as a complete response fragment rather
+// than an increment; a functionCall arrives in full within a single fragment.
 func (p *GeminiProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (<-chan core.StreamEvent, error) {
 	body, err := p.buildBody(req)
 	if err != nil {
@@ -32,17 +32,19 @@ func (p *GeminiProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (
 	events := make(chan core.StreamEvent, 16)
 	go func() {
 		defer close(events)
-		// 泄漏防线：流读尽后必须关闭响应体，否则每次调用漏一个连接
+		// Leak guard: the response body must be closed once the stream is drained,
+		// otherwise every call leaks one connection.
 		defer resp.Body.Close()
-		// 原生 Gemini 流以连接关闭结束，不认 [DONE] 标记
+		// Native Gemini streams end with connection close and carry no [DONE] marker.
 		reader := newSSEReader(resp, true)
 		emit := func(e core.StreamEvent) bool {
 			select {
 			case events <- e:
 				return true
 			case <-ctx.Done():
-				// 契约：取消也必须发终止错误事件，静默关闭会让
-				// 半截内容被当成完整回答返回
+				// Contract: cancellation must also emit a terminal error event;
+				// closing silently would let truncated content be returned as a
+				// complete answer.
 				select {
 				case events <- core.StreamEvent{
 					Type: core.StreamError,
@@ -58,7 +60,7 @@ func (p *GeminiProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (
 		}
 		finish := core.FinishStop
 		toolIdx := 0
-		// nameSeq 同名调用计数：合成 ID 用出现序号消歧，跨 chunk 累计
+		// nameSeq counts same-name calls: synthesized IDs disambiguate by occurrence index, accumulated across chunks.
 		nameSeq := map[string]int{}
 		for {
 			data, done, err := reader.next(ctx)
@@ -81,11 +83,12 @@ func (p *GeminiProtocol) ChatStream(ctx context.Context, req core.ChatRequest) (
 	return events, nil
 }
 
-// emitChunk 转换单个流片段
+// emitChunk converts a single stream fragment.
 //
-// toolIdx 是跨 chunk 的工具调用序号：Gemini 的 functionCall 无 index，
-// 聚合器按 Index 合并分片，不给独立序号时并行调用会互相覆盖
-// returns: false 表示消费端已取消
+// toolIdx is the tool call index carried across chunks: Gemini's functionCall
+// has no index, and the aggregator merges fragments by Index — without an
+// independent index, parallel calls would overwrite each other.
+// returns: false means the consumer has cancelled.
 func (p *GeminiProtocol) emitChunk(data string, toolIdx *int, nameSeq map[string]int, emit func(core.StreamEvent) bool) bool {
 	var chunk struct {
 		Candidates []struct {
@@ -139,8 +142,9 @@ func (p *GeminiProtocol) emitChunk(data string, toolIdx *int, nameSeq map[string
 			}
 			idx := *toolIdx
 			*toolIdx++
-			// 同名并行调用按出现序号消歧（第二次起追加 :<n>），
-			// 首次保持旧格式 gemini:<name>，与流式/非流式一致
+			// Parallel calls with the same name are disambiguated by occurrence
+			// index (appending :<n> from the second onward); the first keeps the
+			// legacy format gemini:<name>, consistent with non-streaming.
 			seq := nameSeq[part.FunctionCall.Name]
 			nameSeq[part.FunctionCall.Name] = seq + 1
 			if !emit(core.StreamEvent{
@@ -159,8 +163,8 @@ func (p *GeminiProtocol) emitChunk(data string, toolIdx *int, nameSeq map[string
 	return true
 }
 
-// chunkFinishReason 提取片段的终止原因
-// returns: 终止原因字符串，无则空串
+// chunkFinishReason extracts the finish reason from a fragment.
+// returns: the finish reason string, or the empty string if absent.
 func chunkFinishReason(data string) string {
 	var probe struct {
 		Candidates []struct {
