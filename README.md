@@ -483,7 +483,7 @@ _ = orch.RegisterWorkflow(&orchestrator.Workflow{
 
 ## 记忆
 
-三种实现同一接口，按 session 隔离，可直换：
+多种实现同一接口，按 session 隔离，可直换、可叠包装饰器：
 
 ```go
 mem := memory.NewBuffer(nil)                          // ① 纯内存，重启即失
@@ -498,6 +498,23 @@ loop := agent.NewLoop(llm, tools, mem, cfg)           // 接口一致，直接�
 | `Buffer` | 否 | 超预算截断最旧消息 |
 | `Persistent` | JSONL/会话 | 同 Buffer，但重启恢复 |
 | `Summary(inner, llm)` | 取决于 inner | 被截断的历史压缩成摘要前缀，不丢上下文 |
+
+### 增长控制（生产必读）
+
+会话数据默认只增不减，长驻进程需要三件套控制内存与磁盘：
+
+```go
+inner, _ := memory.NewPersistentWithLRU("./sessions", nil, 1024) // 内存驻留会话数上限，
+                                                                 // 超限按 LRU 卸载（只卸内存，数据在盘上）
+mem := memory.NewTTL(ctx, inner, 30*time.Minute, 5*time.Minute)   // 空闲 30 分钟逐出会话，
+                                                                 // Persistent 的 Clear 同步删盘
+mem = memory.NewCompactingSummary(mem, cheapLLM)                  // 摘要成功后物理删除已折入的
+                                                                 // 旧消息，长会话占用随摘要收敛
+```
+
+- **惰性加载**：`Persistent` 首访问会话才读文件（不再启动全量加载），万级历史会话不会拖垮启动与内存。
+- **TTL 逐出**：按最后活跃时间判空闲（长会话不会中途被杀），单个后台 janitor 周期清理。
+- **物理压缩**：`NewCompactingSummary` 是 `NewSummary` 的压缩态——旧消息摘要后即删；普通 `NewSummary` 保留完整历史（审计友好）。落盘格式带时间戳，旧格式文件可直接读取，零迁移。
 
 ## 中间件
 

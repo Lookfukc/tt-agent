@@ -4,6 +4,7 @@ package memory
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
 )
@@ -20,7 +21,7 @@ const roughTokens = 2
 // 接口不变，调用方无感
 type Buffer struct {
 	mu       sync.RWMutex
-	sessions map[string][]core.Message
+	sessions map[string]*sessionLog
 	counter  core.TokenCounter
 }
 
@@ -31,14 +32,17 @@ func NewBuffer(counter core.TokenCounter) *Buffer {
 	if counter == nil {
 		counter = roughCounter{}
 	}
-	return &Buffer{sessions: make(map[string][]core.Message), counter: counter}
+	return &Buffer{sessions: make(map[string]*sessionLog), counter: counter}
 }
 
 // Add 追加消息到指定会话
+//
+// token 估算在此一次算好缓存，Recent 装填不再全量重数
 func (b *Buffer) Add(_ context.Context, sessionID string, msgs ...core.Message) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.sessions[sessionID] = append(b.sessions[sessionID], msgs...)
+	log := b.logLocked(sessionID)
+	log.add(b.counter, time.Now(), msgs...)
 	return nil
 }
 
@@ -46,11 +50,30 @@ func (b *Buffer) Add(_ context.Context, sessionID string, msgs ...core.Message) 
 //
 // 系统消息不占预算且始终保留在前，其余按原子组从新到旧装填
 func (b *Buffer) Recent(_ context.Context, sessionID string, budget int64) ([]core.Message, error) {
+	kept, _, err := b.Split(context.Background(), sessionID, budget)
+	return kept, err
+}
+
+// Split 取回预算内外的消息，供 Summary 等装饰层获取被截断内容
+func (b *Buffer) Split(_ context.Context, sessionID string, budget int64) ([]core.Message, []core.Message, error) {
 	b.mu.RLock()
-	msgs := b.sessions[sessionID]
-	b.mu.RUnlock()
-	kept, _ := pickWithinBudget(msgs, budget, b.counter)
-	return kept, nil
+	defer b.mu.RUnlock()
+	log, ok := b.sessions[sessionID]
+	if !ok {
+		return nil, nil, nil
+	}
+	kept, dropped := log.split(budget)
+	return kept, dropped, nil
+}
+
+// Trim 物理丢弃最旧的 n 条非系统消息，系统消息永不删除
+func (b *Buffer) Trim(_ context.Context, sessionID string, n int) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if log, ok := b.sessions[sessionID]; ok {
+		log.trim(n)
+	}
+	return nil
 }
 
 // Clear 清空会话
@@ -59,6 +82,17 @@ func (b *Buffer) Clear(_ context.Context, sessionID string) error {
 	defer b.mu.Unlock()
 	delete(b.sessions, sessionID)
 	return nil
+}
+
+// logLocked 取或建会话日志，调用方必须持有写锁
+// returns: 该会话的日志
+func (b *Buffer) logLocked(sessionID string) *sessionLog {
+	log, ok := b.sessions[sessionID]
+	if !ok {
+		log = &sessionLog{}
+		b.sessions[sessionID] = log
+	}
+	return log
 }
 
 // roughCounter 内置字符级粗估
