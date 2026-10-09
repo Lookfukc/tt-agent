@@ -2,6 +2,9 @@
 
 > **中文** | [English](README.en.md)
 
+[![CI](https://github.com/Lookfukc/tt-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Lookfukc/tt-agent/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Lookfukc/tt-agent.svg)](https://pkg.go.dev/github.com/Lookfukc/tt-agent)
+
 基于 Go 实现的多协议 LLM Agent 框架。统一内部消息类型，协议适配层兼容 **OpenAI / Anthropic / Gemini** 三家协议及一切 OpenAI-compatible 提供商（DeepSeek、GLM、Kimi、本地 ollama / vLLM……）。
 
 - [功能总览](#功能总览)
@@ -883,7 +886,7 @@ err = snaps.Delete(ctx, "session-1", entry.ID)
 
 | 参数/方法 | 说明 |
 |---|---|
-| `New(driver, Options{Codec, MaxPerSession, Prefix, Observer, Backend})` | `MaxPerSession` 默认 20，超出淘汰最旧 |
+| `New(driver, Options{Codec, MaxPerSession, Prefix, Observer, Backend, LockWait})` | `MaxPerSession` 默认 20，超出淘汰最旧；`LockWait` 默认 5s |
 | `Capture(ctx, sessionID, label)` | 记录当前全部消息，返回 `Entry{ID, Label, MessageCount, CreatedAt}` |
 | `Rollback(ctx, sessionID, snapshotID)` | **破坏性**：用快照内容替换会话日志；目标不存在返回 `ErrNoSnapshot` |
 | `RollbackSafe(ctx, sessionID, snapshotID, safetyLabel)` | **非破坏性**：先把当前状态存为安全快照再回滚，返回 `(restored, safety)` 两个 Entry——后悔了用 `safety.ID` 再滚一次即撤销本次回滚 |
@@ -893,6 +896,8 @@ err = snaps.Delete(ctx, "session-1", entry.ID)
 
 - **目标 ID 写错时不产生垃圾快照**：先校验目标存在，不存在直接 `ErrNoSnapshot`，快照日志不被污染
 - **捕获与回滚同锁串行**：两步之间不可能插入并发写入，被丢弃的状态必然完整保存在安全快照里——这正是该方法存在的意义
+
+**跨进程串行**：驱动实现 `memorystore.SessionLocker` 时（Redis 用 `SET NX PX` + token 释放脚本；Postgres 用事务级咨询锁，连接死亡即自动释放），快照操作额外持有该锁，「捕获+回滚」序列对共享同一存储的其他进程同样原子——测试覆盖了双进程并发 `RollbackSafe` 与持锁者崩溃后的锁自动回收。SQLite/文件后端无此能力，保证仅限单进程内（单机部署本来也只有一个进程）。
 
 要点：
 
@@ -964,13 +969,31 @@ mem := ltm.New(store, ltm.Options{Embedder: emb})
 |---|---|
 | `WithHTTPClient(hc)` | 注入自定义 HTTP 客户端（代理 / 测试） |
 | `WithBaseURL(base)` | 覆盖默认 API 根地址（网关 / 本地代理） |
+| `WithDimensions(n)` | 请求指定输出维度（OpenAI text-embedding-3 系与 Voyage 系支持；Gemini 按模型固定，忽略此项） |
 
 行为要点：
 
 - 错误信息**始终携带 provider 响应体片段**——预览版 API 字段漂移时不需要抓包就能定位
 - 空文本直接返回 nil（不发起请求），与 ltm 门面的降级语义对齐
 - 30 秒默认超时，context 取消即时生效；并发安全
-- ⚠️ **Anthropic 端点为预览版**，模型名/字段可能演进；**换 Embedder 通常意味着换向量维度**，配合 pgvector 时需新建表（`Dim` 建表时固定）
+- ⚠️ **Anthropic 适配器未对线上端点实测**：编写环境无法访问 Anthropic 域名，实现基于其公开的预览版 API 描述（端点形状已由密闭测试锁定；认证头为 `x-api-key` + `anthropic-version`）。首次真连若字段有漂移，错误信息会带服务端原文，可即时定位
+- ⚠️ **换 Embedder 通常意味着换向量维度**，配合 pgvector 时需新建表（`Dim` 建表时固定）
+
+#### 内置 LLM Extractor（`pkg/ltm/extractor`）
+
+基于框架自己的 `core.LLM`——协议适配、中间件、重试全部继承，指向 Agent 正在用的 LLM 或更廉价的模型均可：
+
+```go
+ext := extractor.New(llm, extractor.Options{
+    MaxMessages: 100,           // 只取最近 N 条参与抽取
+    Lenient:     true,          // LLM/解析失败返回空而非报错——学习是锦上添花，不该打断对话流
+})
+mem := ltm.New(store, ltm.Options{Embedder: emb, Extractor: ext})
+
+learned, err := mem.Learn(ctx, userID, conversation) // 对话结束后的自动事实抽取
+```
+
+解析器容忍模型给 JSON 包 markdown 围栏和前后废话（首 `[` 到末 `]` 切片解析）；空串事实被丢弃；空对话不发起 LLM 调用。默认严格模式（解析失败报错），`Lenient: true` 变为静默降级。
 
 #### pgvector 后端（PostgreSQL 向量检索）
 
@@ -2336,7 +2359,7 @@ Agent 循环恒走 `ChatStream`。`core.NewPipeline` 上的 `Logging` / `Retry` 
 | Redis (miniredis) | 397K | 2,908K | 14,304K |
 | Postgres（真实） | — | 3,857K | — |
 
-线性增长正是 `maxScan=2000` 默认值存在的原因：它把单次请求组装的最坏耗时钉在毫秒量级；5,000 条的窗口在 Redis 上要 14ms——超长会话的老消息留在窗口外是设计取舍，不是缺陷。
+线性增长正是 `maxScan=2000` 默认值存在的原因：它把单次请求组装的最坏耗时钉在毫秒量级；5,000 条的窗口在 Redis 上要 14ms——超长会话的老消息留在窗口外是设计取舍，不是缺陷。读取触到窗口上限不再静默：`store.CappedReads()` 计数每次出窗读取，运维可以据此发现"会话长过头了"并调大 `Options.MaxScan` 或做压缩。
 
 **Trim（1,000 条会话删 10 条）**：SQLite 606K / Postgres 1,049K / Redis 1,957K（Lua 服务端整段执行）
 
@@ -2400,6 +2423,8 @@ go test -race ./test/ # 竞态检测
 |---|---|
 | `TEST_POSTGRES_DSN` | 启用 Postgres 驱动契约测试 + pgvector 长期记忆测试（如 `postgres://user:pass@localhost:5432/db?sslmode=disable`），CI 应始终设置，使四后端一致性保证覆盖全部实现 |
 
+**CI**（`.github/workflows/ci.yml`）：push/PR 触发，跑 gofmt 检查 → vet → build → **全量测试（`-race`，带真实 pgvector 服务容器）**，并守护 `go.mod` 的 `go 1.24` 版本下限不被依赖悄悄抬高。
+
 白盒测试（需要访问未导出符号时）按 Go 惯例留在源码包内的 `xxx_test.go`。
 
 ---
@@ -2424,6 +2449,7 @@ pkg/
 │   └── memorytest/  测试专用进程内实现
 ├── ltm/             长期记忆：事实抽取 + 向量检索 + 命名空间隔离
 │   ├── embeddings/  开箱即用 Embedder（OpenAI 兼容 / Anthropic / Gemini）
+│   ├── extractor/   内置 LLM 事实抽取器（基于 core.LLM）
 │   └── pgvector/    PostgreSQL + pgvector 向量存储后端
 ├── tools/           工具注册表
 │   ├── builtin/     calculator / clock / http_fetch

@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      # pgvector image so the Postgres driver contract suite and the
+      # long-term-memory vector tests run in CI, not just locally.
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: tt_agent_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/tt_agent_test?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l pkg cmd examples test)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test (with race, real Postgres)
+        run: go test ./... -count=1 -race -timeout 15m
+
+      - name: Verify go.mod stays pinned to go 1.24
+        run: |
+          directive=$(grep '^go ' go.mod)
+          if [ "$directive" != "go 1.24.0" ]; then
+            echo "::error::go.mod directive changed: $directive (a dependency may have raised the floor)"
+            exit 1
+          fi

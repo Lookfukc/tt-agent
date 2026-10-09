@@ -2,6 +2,9 @@
 
 > [中文](README.md) | **English**
 
+[![CI](https://github.com/Lookfukc/tt-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Lookfukc/tt-agent/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Lookfukc/tt-agent.svg)](https://pkg.go.dev/github.com/Lookfukc/tt-agent)
+
 A multi-protocol LLM agent framework implemented in Go. It unifies internal message types, and its protocol adaptation layer is compatible with **OpenAI / Anthropic / Gemini** as well as any OpenAI-compatible provider (DeepSeek, GLM, Kimi, local ollama / vLLM, …).
 
 - [Features Overview](#features-overview)
@@ -897,6 +900,8 @@ err = snaps.Delete(ctx, "session-1", entry.ID)
 - **A mistyped target ID leaves no junk snapshot**: the target is validated first; a missing ID returns `ErrNoSnapshot` without polluting the snapshot log
 - **Capture and rollback are serialized under one lock**: no concurrent write can land between the two steps, so the discarded state is guaranteed to be intact inside the safety snapshot — which is the entire point of the method
 
+**Cross-process serialization**: when the driver implements `memorystore.SessionLocker` (Redis via `SET NX PX` plus a token-checked release script; Postgres via transaction-scoped advisory locks that evaporate when the connection dies), snapshot operations additionally hold that lock, making the capture-then-rollback sequence atomic against other processes sharing the storage — dual-process concurrent `RollbackSafe` and crash-recovery of the lock are both covered by tests. SQLite and the file backend lack the capability, so their guarantee holds within one process (single-machine deployments run one process anyway).
+
 Key points:
 
 - Snapshots are encoded through the same `Codec`, so **snapshots are ciphertext when encryption is on** (covered by tests)
@@ -967,13 +972,31 @@ mem := ltm.New(store, ltm.Options{Embedder: emb})
 |---|---|
 | `WithHTTPClient(hc)` | Inject a custom HTTP client (proxies / tests) |
 | `WithBaseURL(base)` | Override the default API root (gateways / local proxies) |
+| `WithDimensions(n)` | Request a specific output dimension (supported by OpenAI text-embedding-3 and Voyage models; Gemini fixes dimension per model and ignores it) |
 
 Behavior notes:
 
 - Error messages **always carry a snippet of the provider's response body** — a schema drift in a preview API is diagnosable without a packet capture
 - Empty text returns nil without a request, matching the facade's degrade semantics
 - 30-second default timeout, immediate context cancellation, safe for concurrent use
-- ⚠️ **The Anthropic endpoint is a preview**; model names and fields may evolve. **Switching embedders usually means switching vector dimensions** — with pgvector that means a new table (`Dim` is fixed at creation)
+- ⚠️ **The Anthropic adapter has not been tested against the live endpoint**: the build environment cannot reach Anthropic domains, and the implementation follows their published preview-API description (endpoint shape locked by hermetic tests; auth via `x-api-key` + `anthropic-version`). If fields have drifted, the first real call's error will carry the server's response for immediate diagnosis
+- ⚠️ **Switching embedders usually means switching vector dimensions** — with pgvector that means a new table (`Dim` is fixed at creation)
+
+#### Built-in LLM Extractor (`pkg/ltm/extractor`)
+
+Built on the framework's own `core.LLM` — protocol adapters, middleware and retry all inherited; point it at the LLM your agent already uses, or a cheaper one:
+
+```go
+ext := extractor.New(llm, extractor.Options{
+    MaxMessages: 100,   // only the most recent N messages are considered
+    Lenient:     true,  // LLM/parse failures return no facts instead of erroring — learning is a nicety and must not break the flow that triggered it
+})
+mem := ltm.New(store, ltm.Options{Embedder: emb, Extractor: ext})
+
+learned, err := mem.Learn(ctx, userID, conversation) // automatic fact extraction after a conversation
+```
+
+The parser tolerates models wrapping JSON in markdown fences and prose (slices from the first `[` to the last `]`); blank facts are dropped; an empty conversation makes no LLM call. Strict by default (a parse failure errors); `Lenient: true` degrades silently.
 
 #### The pgvector Backend (PostgreSQL Vector Search)
 
@@ -2328,7 +2351,7 @@ Machine: Intel Core Ultra 9 185H (22 threads), Windows; SQLite and the file back
 | Redis (miniredis) | 397K | 2,908K | 14,304K |
 | Postgres (real) | — | 3,857K | — |
 
-The linear growth is exactly why `maxScan=2000` exists as the default: it pins the worst-case request assembly at milliseconds. A 5,000-message window costs 14ms on Redis — leaving older messages outside the window is a deliberate trade-off, not an oversight.
+The linear growth is exactly why `maxScan=2000` exists as the default: it pins the worst-case request assembly at milliseconds. A 5,000-message window costs 14ms on Redis — leaving older messages outside the window is a deliberate trade-off, not an oversight. Reads that hit the window cap are no longer silent: `store.CappedReads()` counts every capped read, so operators can notice sessions that outgrew their window and raise `Options.MaxScan` or compact them.
 
 **Trim (10 removed from a 1,000-message session)**: SQLite 606K / Postgres 1,049K / Redis 1,957K (the whole Lua script runs server-side).
 
@@ -2392,6 +2415,8 @@ Storage-driver tests that need an external server enable it through an environme
 |---|---|
 | `TEST_POSTGRES_DSN` | Enables the Postgres driver contract suite plus the pgvector long-term-memory tests (e.g. `postgres://user:pass@localhost:5432/db?sslmode=disable`); CI should always set it so the four-backend parity guarantee covers every implementation |
 
+**CI** (`.github/workflows/ci.yml`): runs on push/PR — gofmt check → vet → build → **full tests (`-race`, with a real pgvector service container)**, and guards the `go 1.24` floor in `go.mod` against being silently raised by a dependency.
+
 White-box tests (for when unexported symbols must be reached) stay in `xxx_test.go` inside the source package, per Go convention.
 
 ---
@@ -2416,6 +2441,7 @@ pkg/
 │   └── memorytest/  test-only in-process implementation
 ├── ltm/             long-term memory: fact extraction + vector search + namespaces
 │   ├── embeddings/  ready-to-use embedders (OpenAI-compatible / Anthropic / Gemini)
+│   ├── extractor/   built-in LLM fact extractor (on core.LLM)
 │   └── pgvector/    PostgreSQL + pgvector vector store backend
 ├── tools/           tool registry
 │   ├── builtin/     calculator / clock / http_fetch
