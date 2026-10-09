@@ -290,12 +290,24 @@ func (l *Loop) callLLM(ctx context.Context, history []core.Message, sessionID st
 	ctx, span := l.tracer().StartSpan(ctx, "llm.stream", "model", l.cfg.Model, "iter", iter)
 	defer span.End()
 
+	messages := sanitizeHistory(history)
+	// The system prompt is configuration, not history: it is injected
+	// at request-assembly time on every iteration rather than written
+	// into memory. Idempotent across iterations, identical for the
+	// stateful and stateless paths, and never persisted beside user
+	// data. (This was a real bug found by the demo consumer: the field
+	// was plumbed through every layer but never reached the request.)
+	if l.cfg.SystemPrompt != "" {
+		messages = append([]core.Message{{
+			Role: core.RoleSystem, Content: l.cfg.SystemPrompt,
+		}}, messages...)
+	}
 	req := core.ChatRequest{
 		Model: l.cfg.Model,
 		// Request-side normalization: dangling assistant(tool_calls)
 		// get synthesized results, orphan tool messages are removed;
 		// memory itself is untouched.
-		Messages: sanitizeHistory(history),
+		Messages: messages,
 		Thinking: l.cfg.Thinking,
 	}
 	if l.cfg.Temperature != nil {
