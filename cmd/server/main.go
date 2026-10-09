@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -17,11 +18,148 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/Lookfukc/tt-agent/pkg/adapters/provider"
+	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/entry"
 	"github.com/Lookfukc/tt-agent/pkg/memory"
+	"github.com/Lookfukc/tt-agent/pkg/memory/memorystore"
+	"github.com/Lookfukc/tt-agent/pkg/memory/postgres"
+	"github.com/Lookfukc/tt-agent/pkg/memory/redis"
+	"github.com/Lookfukc/tt-agent/pkg/memory/sqlite"
 	"github.com/Lookfukc/tt-agent/pkg/tools"
 	"github.com/Lookfukc/tt-agent/pkg/tools/builtin"
 )
+
+// memoryFlags carries the backend-specific flag values.
+type memoryFlags struct {
+	dir         string
+	maxLoaded   int
+	dsn         string
+	redisPrefix string
+	pgPoolMax   int
+	ttl         time.Duration
+	pruneEvery  time.Duration
+}
+
+// sweepLoop periodically invokes prune until stop is closed.
+//
+// SQLite and Postgres have no native expiry, so retention there is an
+// explicit sweep; Redis needs none of this (its keys carry a TTL).
+// Errors are logged and retried on the next tick: retention is
+// best-effort and must never take the server down.
+func sweepLoop(stop <-chan struct{}, every time.Duration, prune func(ctx context.Context) error) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			if err := prune(context.Background()); err != nil {
+				log.Printf("memory prune: %v", err)
+			}
+		}
+	}
+}
+
+// buildMemory constructs the session memory backend named by kind.
+//
+// It returns a nil memory (and nil closer) for the "file" backend when
+// no directory is configured, which tells the server to use its own
+// default. Every other backend must produce a memory or an error:
+// silently falling back to a different store would send a user's data
+// somewhere they did not ask for.
+func buildMemory(kind string, f memoryFlags) (core.Memory, func(), error) {
+	ctx := context.Background()
+	switch kind {
+	case "file":
+		if f.dir == "" {
+			log.Printf("session memory: file backend at default dir %s", entry.DefaultMemoryDir())
+			return nil, nil, nil
+		}
+		mem, err := memory.NewPersistentWithLRU(f.dir, nil, f.maxLoaded)
+		if err != nil {
+			return nil, nil, err
+		}
+		log.Printf("session memory: file backend dir=%s maxLoaded=%d", f.dir, f.maxLoaded)
+		return mem, nil, nil
+
+	case "sqlite":
+		if f.dsn == "" {
+			return nil, nil, errors.New("--memory-dsn is required for the sqlite backend")
+		}
+		d, err := sqlite.New(f.dsn, sqlite.Options{})
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := d.Migrate(ctx); err != nil {
+			_ = d.Close()
+			return nil, nil, err
+		}
+		log.Printf("session memory: sqlite backend dsn=%s", f.dsn)
+		stopSweep := pruneSweeper(d.PruneIdleSessions, f)
+		return d.Memory(memorystore.Options{}), func() { stopSweep(); _ = d.Close() }, nil
+
+	case "redis":
+		if f.dsn == "" {
+			return nil, nil, errors.New("--memory-dsn is required for the redis backend (redis://host:port)")
+		}
+		d, err := redis.NewFromURL(ctx, f.dsn, redis.Options{
+			Prefix:     f.redisPrefix,
+			SessionTTL: f.ttl,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		log.Printf("session memory: redis backend ttl=%s prefix=%q", f.ttl, f.redisPrefix)
+		return d.Memory(memorystore.Options{}), func() { _ = d.Close() }, nil
+
+	case "postgres":
+		if f.dsn == "" {
+			return nil, nil, errors.New("--memory-dsn is required for the postgres backend")
+		}
+		d, err := postgres.NewFromURL(ctx, f.dsn, postgres.Options{})
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := d.Migrate(ctx); err != nil {
+			_ = d.Close()
+			return nil, nil, err
+		}
+		log.Printf("session memory: postgres backend poolMax=%d", f.pgPoolMax)
+		stopSweep := pruneSweeper(d.PruneIdleSessions, f)
+		return d.Memory(memorystore.Options{}), func() { stopSweep(); _ = d.Close() }, nil
+
+	default:
+		return nil, nil, fmt.Errorf("unknown memory type %q (want file/sqlite/redis/postgres)", kind)
+	}
+}
+
+// pruneSweeper starts a retention sweep for backends without native
+// expiry and returns the function that stops it. When no --memory-ttl
+// is configured there is nothing to sweep; the returned stop function
+// is a no-op. Stopping the sweep never closes the driver — the caller
+// composes both.
+func pruneSweeper(prune func(ctx context.Context, idle time.Duration) (int64, error), f memoryFlags) func() {
+	if f.ttl <= 0 {
+		// No retention configured: nothing sweeps, data lives forever.
+		// That is a legitimate choice; only note it so the operator knows.
+		log.Printf("memory retention: --memory-ttl not set, sessions are kept indefinitely")
+		return func() {}
+	}
+	every := f.pruneEvery
+	if every <= 0 {
+		every = 5 * time.Minute
+	}
+	stop := make(chan struct{})
+	go sweepLoop(stop, every, func(ctx context.Context) error {
+		n, err := prune(ctx, f.ttl)
+		if err == nil && n > 0 {
+			log.Printf("memory prune: removed %d idle sessions", n)
+		}
+		return err
+	})
+	return func() { close(stop) }
+}
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
@@ -34,8 +172,14 @@ func main() {
 	prompt := flag.String("prompt", "", "default system prompt")
 	enableFetch := flag.Bool("enable-httpfetch", false, "register http_fetch tool (SSRF surface, off by default)")
 	allowPrivate := flag.Bool("httpfetch-allow-private", false, "allow http_fetch to reach private networks")
-	memDir := flag.String("memory-dir", "", "session memory dir (default: shared temp dir, restart-safe on same machine)")
-	memMaxLoaded := flag.Int("memory-max-loaded", 1024, "max sessions resident in memory (LRU evict beyond)")
+	memType := flag.String("memory-type", "file", "session memory backend: file / sqlite / redis / postgres")
+	memDir := flag.String("memory-dir", "", "file backend: session dir (default: shared temp dir)")
+	memMaxLoaded := flag.Int("memory-max-loaded", 1024, "file backend: max sessions resident in memory (LRU evict beyond)")
+	memDSN := flag.String("memory-dsn", "", "sqlite: database path; redis: redis:// URL; postgres: connection string")
+	memRedisPrefix := flag.String("memory-redis-prefix", "", "redis: key prefix (default agent:mem:)")
+	memPGPoolMax := flag.Int("memory-postgres-pool", 0, "postgres: max pool connections (0 = driver default)")
+	memTTL := flag.Duration("memory-ttl", 0, "session retention: redis applies it natively; sqlite/postgres sweep it every --memory-prune-every (0 = keep forever)")
+	memPruneEvery := flag.Duration("memory-prune-every", 5*time.Minute, "sqlite/postgres: how often the idle-session sweep runs")
 	flag.Parse()
 
 	// Vendor configuration is just flags+env; for multi-vendor setups
@@ -76,21 +220,27 @@ func main() {
 		toolReg.Register(fetch)
 	}
 
-	// Session memory: an explicit directory wins; without one, persist
-	// to a temp dir (recoverable across restarts on the same machine)
-	// rather than falling back to process memory. For multi-instance
-	// deployments, configure a dedicated dir per instance or swap in an
-	// external storage implementation.
+	// Session memory: pick a backend. The file backend needs no
+	// infrastructure; sqlite/redis/postgres let several processes or
+	// instances share one session store.
 	memOpts := []entry.Option{}
-	if *memDir != "" {
-		mem, err := memory.NewPersistentWithLRU(*memDir, nil, *memMaxLoaded)
-		if err != nil {
-			log.Fatalf("init memory dir: %v", err)
-		}
+	mem, closeMem, err := buildMemory(*memType, memoryFlags{
+		dir:         *memDir,
+		maxLoaded:   *memMaxLoaded,
+		dsn:         *memDSN,
+		redisPrefix: *memRedisPrefix,
+		pgPoolMax:   *memPGPoolMax,
+		ttl:         *memTTL,
+		pruneEvery:  *memPruneEvery,
+	})
+	if err != nil {
+		log.Fatalf("init %s memory: %v", *memType, err)
+	}
+	if closeMem != nil {
+		defer closeMem()
+	}
+	if mem != nil {
 		memOpts = append(memOpts, entry.WithMemory(mem))
-		log.Printf("session memory dir: %s (max loaded %d)", *memDir, *memMaxLoaded)
-	} else {
-		log.Printf("session memory dir: %s (default temp dir)", entry.DefaultMemoryDir())
 	}
 
 	srv := entry.NewServer(registry, toolReg,

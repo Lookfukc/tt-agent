@@ -777,14 +777,202 @@ type SummaryStore interface {   // implemented by Persistent; summaries are pers
 
 #### Choosing an Implementation
 
-| Implementation | Persistence | Memory footprint | Long-session behavior | Use case |
+| Implementation | Persistence | Memory footprint | Shared across instances | Use case |
 |---|---|---|---|---|
-| `Persistent` | JSONL / session | Bounded (LRU resident) | Truncates the oldest messages when over budget | **Production default** |
-| `Summary(inner, llm)` | Depends on inner | Same as inner | Compresses the truncated part into a summary prefix | When long context must not lose information |
-| `TTL(inner, ...)` | Depends on inner | Bounded | Evicts idle sessions | Long-running processes that must not accumulate |
-| `memorytest.Buffer` | No | Unbounded | Truncates when over budget | **Testing only** |
+| `Persistent` | JSONL / session | Bounded (LRU resident) | ❌ single machine | **Single-node default, zero dependencies** |
+| `sqlite.Driver` | single-file database | None (direct queries) | ✅ multi-process on one host | Single node, several processes, SQL queries |
+| `redis.Driver` | Redis | None (direct queries) | ✅ across machines | **Multi-instance deployments, native TTL** |
+| `postgres.Driver` | PostgreSQL | None (direct queries) | ✅ across machines | Teams already running Postgres, transactions/auditing |
+| `Summary(inner, llm)` | Depends on inner | Same as inner | Same as inner | When long context must not lose information |
+| `TTL(inner, ...)` | Depends on inner | Bounded | Same as inner | Evicts idle sessions |
+| `memorytest.Buffer` | No | Unbounded | ❌ | **Testing only** |
 
-> The pure in-process memory implementation has been removed from the public API (it is easy to misuse in production: gone on restart, unbounded residency). Use the `pkg/memory/memorytest` subpackage for tests and temporary demos; callers that already have a database only need to implement the three methods of `core.Memory` to plug in (see [Example 15](#example-15-custom-memory-backend)).
+> The pure in-process memory implementation has been removed from the public API (it is easy to misuse in production: gone on restart, unbounded residency). Use the `pkg/memory/memorytest` subpackage for tests and temporary demos.
+
+**Every backend shares one set of semantics** — budget truncation, atomic `tool_calls` grouping, system-message retention — because they reuse the same `internal/sessionlog` implementation and are covered by the same contract test suite. Swapping a backend never changes conversation behavior.
+
+### External Storage Backends
+
+All three external backends share one driver contract: `pkg/memory/memorystore` defines `Driver` (which only stores and retrieves bytes) while budget accounting and truncation live in `Store`. A driver therefore never needs to understand token budgets, and they cannot drift apart.
+
+```go
+// Redis: shared across instances + native TTL (idle sessions expire
+// inside Redis, with no sweeper goroutine in your process)
+d, err := redis.NewFromURL(ctx, "redis://localhost:6379/0", redis.Options{
+	SessionTTL: 30 * time.Minute,
+})
+if err != nil {
+	return err
+}
+defer d.Close()
+mem := d.Memory(memorystore.Options{})
+
+// SQLite: one file, multi-process safe, pure Go with no CGO
+d, err := sqlite.New("./sessions.db", sqlite.Options{})
+if err != nil {
+	return err
+}
+defer d.Close()
+if err := d.Migrate(ctx); err != nil { // creates tables; idempotent
+	return err
+}
+mem := d.Memory(memorystore.Options{})
+
+// PostgreSQL: reuse an existing server; create the schema before Migrate
+d, err := postgres.NewFromURL(ctx, dsn, postgres.Options{Schema: "agent"})
+if err != nil {
+	return err
+}
+defer d.Close()
+if err := d.Migrate(ctx); err != nil {
+	return err
+}
+mem := d.Memory(memorystore.Options{})
+```
+
+The `*memorystore.Store` returned by all three implements `core.Memory` plus `Splitter`, `Trimmer` and `SummaryStore`, so the decorators apply unchanged:
+
+```go
+mem = memory.NewCompactingSummary(mem, cheapLLM) // summary compaction still works
+mem = memory.NewTTL(ctx, mem, 30*time.Minute, 5*time.Minute)
+```
+
+| Backend | Keys / tables | Retention |
+|---|---|---|
+| Redis | `agent:mem:{id}` (LIST), `:system` (LIST), `:sum` (STRING) | Native `EXPIRE` (`SessionTTL`) |
+| SQLite | `agent_messages` / `agent_summaries` tables | Call `PruneIdleSessions(idle)` on a timer |
+| Postgres | Same tables (isolated per schema) | Call `PruneIdleSessions(idle)` on a timer |
+
+> **Why Redis keeps two lists:** the parallel `system` list records which entries are system messages, so `Trim` can locate the oldest *non-system* messages without decrypting or parsing every message (system messages are never trimmed). The cost is that writes go through a pipeline to keep both lists the same length.
+>
+> **Trim atomicity:** the whole trim runs as a Lua script on the Redis server's single thread. A client-side read-rebuild-rename implementation has a lost-update race — a message appended by another process between the LRANGE and the RENAME is silently swallowed by the rename. While a script executes, no other command can interleave, so a concurrent `Add` lands entirely before or entirely after a trim.
+
+### Encryption at Rest
+
+Encryption lives at the **codec boundary**, not inside drivers — so all three backends plus the local JSONL store gain it automatically, and no driver ever handles a key:
+
+```go
+codec, err := memorystore.NewEncryptedCodec([]byte(os.Getenv("MEMORY_KEY")), nil)
+if err != nil {
+	return err
+}
+mem := d.Memory(memorystore.Options{Codec: codec}) // identical for any driver
+```
+
+- Algorithm: **AES-256-GCM**; the key may be any length (SHA-256 derives 32 bytes internally)
+- Record format: `base64("ttae1" || nonce(12) || ciphertext || tag)`, version-prefixed so the format can evolve
+- The nonce doubles as the GCM additional data, so ciphertext cannot be recombined with a different nonce
+- **Backward compatible**: records without the version prefix are read as plaintext, so an existing dataset can be encrypted in place with no rewrite
+- A wrong key or tampered data is treated as a corrupt record (`ErrDecrypt`), which never takes a whole session down
+
+> ⚠️ This protects **data at rest** (database files, Redis snapshots, leaked backups). Transport still needs TLS, and the key itself belongs in a KMS or environment variable — never in code.
+
+### Snapshots and Rollback (Time Travel)
+
+External drivers store an append-only log: you can append and truncate, but you cannot ask "what did this session look like three turns ago", nor undo a bad turn. `pkg/memory/snapshot` adds that layer **without changing the `core.Memory` contract**:
+
+```go
+snaps := snapshot.New(driver, snapshot.Options{}) // wraps the Driver, shares the same storage
+
+entry, err := snaps.Capture(ctx, "session-1", "before-tool-call")
+// ... the model takes a turn that does not go well ...
+if _, err := snaps.Rollback(ctx, "session-1", entry.ID); err != nil {
+	return err
+}
+
+list, err := snaps.List(ctx, "session-1")  // newest first
+err = snaps.Delete(ctx, "session-1", entry.ID)
+```
+
+| Parameter / method | Description |
+|---|---|
+| `New(driver, Options{Codec, MaxPerSession, Prefix})` | `MaxPerSession` defaults to 20; older snapshots are evicted |
+| `Capture(ctx, sessionID, label)` | Records all current messages; returns `Entry{ID, Label, MessageCount, CreatedAt}` |
+| `Rollback(ctx, sessionID, snapshotID)` | **Destructive**: replaces the session log with the snapshot; `ErrNoSnapshot` when missing |
+| `List` / `Delete` | Enumeration (newest first) and single-snapshot removal |
+
+Key points:
+
+- Snapshots are encoded through the same `Codec`, so **snapshots are ciphertext when encryption is on** (covered by tests)
+- Snapshots live under a derived `snapshot:<sessionID>` key and **never mix into the conversation**
+- Rollback is destructive by design; `Capture` first if the current state should stay recoverable
+- Restore passes the recorded payloads through verbatim rather than re-encoding them
+
+### Long-Term Memory and Vector Search
+
+Everything above answers "does it remember this conversation"; `pkg/ltm` answers "does it still remember *you* next time". The two are deliberately separate: session history is an **ordered log read chronologically**, long-term memory is an **unordered set of facts read by relevance**.
+
+```go
+store := ltm.NewMemoryStore(ltm.MemoryOptions{MaxFactsPerNamespace: 1000})
+mem := ltm.New(store, ltm.Options{
+	Embedder:  myEmbedder,   // optional: falls back to keyword matching
+	Extractor: myExtractor,  // optional: without it only explicit Remember works
+})
+
+// Store a fact explicitly
+fact, err := mem.Remember(ctx, userID, "The user is allergic to peanuts", map[string]string{"source": "session-42"})
+
+// Recall by relevance
+facts, err := mem.Recall(ctx, userID, "recommend a restaurant", 5)
+if prompt := ltm.Prompt(facts); prompt != "" {
+	// Inject as a system message so the model sees durable context
+	messages = append(messages, core.Message{Role: core.RoleSystem, Content: prompt})
+}
+
+// Mine facts from a finished conversation (requires an Extractor)
+learned, err := mem.Learn(ctx, userID, conversation)
+
+// Management
+err = mem.Forget(ctx, userID, fact.ID)
+list, err := mem.List(ctx, userID, 20)
+err = store.Clear(ctx, userID)
+```
+
+| Concept | Description |
+|---|---|
+| `Fact` | One statement: `ID` / `Namespace` / `Text` / `Metadata` / timestamps / `Score` |
+| `Namespace` | Isolation dimension (usually a user ID); **never visible across namespaces**, and an empty namespace is rejected |
+| `Store` | Storage interface: `Upsert` / `Search` / `List` / `Delete` / `Clear` |
+| `MemoryStore` | Built-in in-process implementation with vector search and a size cap |
+| `pgvector.Store` | PostgreSQL + pgvector implementation: shared, durable, true vector search |
+| `Embedder` | Text to vector; `EmbedderFunc` adapts any provider in one line |
+| `Extractor` | Distills conversations into facts; `ExtractorFunc` likewise |
+| `Prompt(facts)` | Renders recalled facts as a system-prompt fragment |
+| `KeywordScore` | Exported keyword-scoring function so external Store implementations degrade with consistent ranking |
+
+#### The pgvector Backend (PostgreSQL Vector Search)
+
+`pkg/ltm/pgvector` puts long-term memory into PostgreSQL with the pgvector extension — shared across processes, durable, with cosine ranking in SQL. Vectors travel in pgvector's text format (`'[1,2,3]'::vector`), so there is **no extra client-side dependency**:
+
+```go
+store, err := pgvector.NewFromURL(ctx, "postgres://user:pass@host/db", pgvector.Options{
+	Dim:    1536, // fixed at table creation; switching embedding providers means a new table
+	Schema: "agent",
+})
+if err != nil {
+	return err
+}
+defer store.Close()
+if err := store.Migrate(ctx); err != nil { // extension + table; idempotent; needs CREATE EXTENSION rights
+	return err
+}
+mem := ltm.New(store, ltm.Options{Embedder: myEmbedder})
+```
+
+Behavior aligns strictly with the in-process implementation:
+
+- **Dimension mismatch degrades to a NULL vector**: after switching embedding providers, old facts stay reachable by keyword and writes never fail
+- **Non-finite values (NaN/Inf) also store NULL**: pgvector would reject them; losing ranking beats losing the fact
+- **Vector ranking happens in SQL** (`ORDER BY embedding <=> $query`); the keyword fallback ranks in Go with the shared `KeywordScore` — the same scoring the built-in store uses
+- The connecting role must own the database or hold `CREATE EXTENSION` privileges (Migrate reports this clearly)
+
+Design notes:
+
+- **Deduplication via stable IDs**: re-learning the same fact updates one row (a hash of `namespace + normalized text`) instead of piling up duplicates, with no extra LLM "merge or add" call
+- **Degrade without losing data**: when embedding fails the fact is still stored and still reachable by keyword — losing a user's preference is worse than ranking it poorly
+- **One ranking strategy per call**: either all vector similarity or all keyword overlap, so scores stay comparable
+- **Size cap**: `MaxFactsPerNamespace` defaults to 1000 and evicts by insertion order, not timestamps (same-nanosecond writes would order unstably)
+- **Dimension mismatch never panics**: switching embedding providers yields zero similarity, so those facts are filtered rather than crashing a live request
 
 #### `Persistent`
 
@@ -994,8 +1182,13 @@ go run github.com/Lookfukc/tt-agent/cmd/server@latest \
 | `--prompt` | string | empty | Default system prompt |
 | `--enable-httpfetch` | bool | `false` | Register the `http_fetch` tool (an SSRF surface, off by default) |
 | `--httpfetch-allow-private` | bool | `false` | Allow `http_fetch` to reach internal networks |
-| `--memory-dir` | string | empty | Session memory directory; empty uses the shared temp directory |
-| `--memory-max-loaded` | int | `1024` | Cap on sessions resident in memory; beyond it, LRU unloads |
+| `--memory-type` | string | `file` | Session memory backend: `file` / `sqlite` / `redis` / `postgres` |
+| `--memory-dir` | string | empty | `file` backend: session directory; empty uses the shared temp directory |
+| `--memory-max-loaded` | int | `1024` | `file` backend: cap on sessions resident in memory; beyond it, LRU unloads |
+| `--memory-dsn` | string | empty | `sqlite`: file path; `redis`: `redis://host:port/db`; `postgres`: connection string |
+| `--memory-redis-prefix` | string | empty | `redis` backend: key prefix (default `agent:mem:`) |
+| `--memory-ttl` | duration | `0` | Session retention: `redis` expires natively; `sqlite`/`postgres` sweep it every `--memory-prune-every` (0 = keep forever) |
+| `--memory-prune-every` | duration | `5m` | `sqlite`/`postgres`: how often the idle-session sweep runs |
 
 For the multi-provider per-request routing scenario, write your own `main`, register several providers, and then use `entry.NewServer`.
 
@@ -2070,6 +2263,12 @@ go test ./...         # everything
 go test -race ./test/ # race detection
 ```
 
+Storage-driver tests that need an external server enable it through an environment variable and skip gracefully when unset:
+
+| Environment variable | Purpose |
+|---|---|
+| `TEST_POSTGRES_DSN` | Enables the Postgres driver contract suite plus the pgvector long-term-memory tests (e.g. `postgres://user:pass@localhost:5432/db?sslmode=disable`); CI should always set it so the four-backend parity guarantee covers every implementation |
+
 White-box tests (for when unexported symbols must be reached) stay in `xxx_test.go` inside the source package, per Go convention.
 
 ---
@@ -2085,8 +2284,15 @@ pkg/
 │   ├── provider/    provider configs, registry, named quirks, pricing
 │   └── protocol/    OpenAI / Anthropic / Gemini protocol implementations
 ├── agent/           ReAct loop, stateless mode
-├── memory/          session memory (Persistent / Summary / TTL)
+├── memory/          session memory
+│   ├── memorystore/ driver contract (Codec / Driver / Store) + encrypting codec
+│   ├── redis/       Redis driver (native TTL)
+│   ├── sqlite/      SQLite driver (one file, multi-process, pure Go)
+│   ├── postgres/    PostgreSQL driver (schema-isolated)
+│   ├── snapshot/    snapshots and rollback (time travel)
 │   └── memorytest/  test-only in-process implementation
+├── ltm/             long-term memory: fact extraction + vector search + namespaces
+│   └── pgvector/    PostgreSQL + pgvector vector store backend
 ├── tools/           tool registry
 │   ├── builtin/     calculator / clock / http_fetch
 │   └── mcp/         MCP client (stdio / Streamable HTTP)

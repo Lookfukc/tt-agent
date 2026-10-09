@@ -775,6 +775,204 @@ type SummaryStore interface {   // Persistent 实现，摘要随会话落盘
 
 #### 实现选型
 
+| 实现 | 持久化 | 内存占用 | 多实例共享 | 适用场景 |
+|---|---|---|---|---|
+| `Persistent` | JSONL / 会话 | 有界（LRU 驻留） | ❌ 单机 | **单机默认，零依赖** |
+| `sqlite.Driver` | 单文件数据库 | 无（直查） | ✅ 同机多进程 | 单节点多进程、需要 SQL 查询 |
+| `redis.Driver` | Redis | 无（直查） | ✅ 跨机 | **多实例部署、原生 TTL** |
+| `postgres.Driver` | PostgreSQL | 无（直查） | ✅ 跨机 | 已有 PG、需要事务/审计 |
+| `Summary(inner, llm)` | 取决于 inner | 同 inner | 同 inner | 长上下文不丢信息 |
+| `TTL(inner, ...)` | 取决于 inner | 有界 | 同 inner | 空闲逐出会话 |
+| `memorytest.Buffer` | 否 | 无界 | ❌ | **仅测试** |
+
+> 进程内纯内存实现已从公开 API 移除（易被误用于生产：重启即失、无界驻留）。测试与临时演示请用 `pkg/memory/memorytest` 子包。
+
+**所有后端共用同一套语义**（预算截断、tool_calls 原子组配对、系统消息保留），因为它们复用同一个 `internal/sessionlog` 实现，并由同一套契约测试覆盖——换后端不会改变对话行为。
+
+### 外部存储后端
+
+三种外部后端共享同一套驱动契约：`pkg/memory/memorystore` 定义 `Driver`（只负责存取字节），预算计算与截断由 `Store` 统一完成。因此驱动实现不需要理解 token 预算，也不会各自跑偏。
+
+```go
+// Redis：多实例共享 + 原生 TTL（空闲会话由 Redis 自己过期，无需清扫协程）
+d, err := redis.NewFromURL(ctx, "redis://localhost:6379/0", redis.Options{
+	SessionTTL: 30 * time.Minute,
+})
+if err != nil {
+	return err
+}
+defer d.Close()
+mem := d.Memory(memorystore.Options{})
+
+// SQLite：单文件、多进程安全、纯 Go 无 CGO
+d, err := sqlite.New("./sessions.db", sqlite.Options{})
+if err != nil {
+	return err
+}
+defer d.Close()
+if err := d.Migrate(ctx); err != nil { // 建表，幂等
+	return err
+}
+mem := d.Memory(memorystore.Options{})
+
+// PostgreSQL：已有 PG 时复用；需要先建 schema 再 Migrate
+d, err := postgres.NewFromURL(ctx, dsn, postgres.Options{Schema: "agent"})
+if err != nil {
+	return err
+}
+defer d.Close()
+if err := d.Migrate(ctx); err != nil {
+	return err
+}
+mem := d.Memory(memorystore.Options{})
+```
+
+三种后端返回的 `*memorystore.Store` 同时实现 `core.Memory` + `Splitter` + `Trimmer` + `SummaryStore`，所以可以直接叠装饰器：
+
+```go
+mem = memory.NewCompactingSummary(mem, cheapLLM) // 摘要压缩照常可用
+mem = memory.NewTTL(ctx, mem, 30*time.Minute, 5*time.Minute)
+```
+
+| 后端 | 键/表结构 | 清理方式 |
+|---|---|---|
+| Redis | `agent:mem:{id}` (LIST)、`:system` (LIST)、`:sum` (STRING) | 原生 `EXPIRE`（`SessionTTL`） |
+| SQLite | `agent_messages` / `agent_summaries` 两表 | `PruneIdleSessions(idle)` 定时调用 |
+| Postgres | 同 SQLite（按 schema 隔离） | `PruneIdleSessions(idle)` 定时调用 |
+
+> **为什么 Redis 用两个 LIST**：`system` 平行列表记录「哪条是系统消息」。这样 `Trim` 就能在不解密、不解析全部消息的前提下定位最旧的**非系统**消息（系统消息永不删除）。代价是写入走 pipeline 保证两个列表等长。
+>
+> **Trim 的原子性**：整个修剪作为 Lua 脚本在 Redis 服务端单线程执行。客户端"读→重建→改名"的实现存在丢失更新竞态——LRANGE 与 RENAME 之间别的进程追加的消息会被改名覆盖吞掉。服务端脚本执行期间没有其他命令能插入，并发 `Add` 要么完整落在修剪前、要么完整落在修剪后。
+
+### 加密存储
+
+加密挂在**编解码层**，不在驱动层——因此三个后端外加本地 JSONL 全部自动获得加密能力，而密钥从不进入驱动代码：
+
+```go
+codec, err := memorystore.NewEncryptedCodec([]byte(os.Getenv("MEMORY_KEY")), nil)
+if err != nil {
+	return err
+}
+mem := d.Memory(memorystore.Options{Codec: codec}) // 任何驱动都一样
+```
+
+- 算法：**AES-256-GCM**，密钥任意长度（内部 SHA-256 派生为 32 字节）
+- 记录格式：`base64("ttae1" || nonce(12) || ciphertext || tag)`，带版本前缀便于将来演进
+- nonce 同时作为 GCM 的 additional data，防止密文被换 nonce 重组
+- **向后兼容**：无版本前缀的记录按明文读取，所以已加密的数据集可以就地开启加密，无需重写
+- 密钥错误或数据被篡改时按「损坏记录」跳过（`ErrDecrypt`），不会让整个会话崩溃
+
+> ⚠️ 这保护的是**静态数据**（数据库文件、Redis 快照、备份泄露）。传输层仍需 TLS，密钥本身需要 KMS 或环境变量管理，不要写进代码。
+
+### 快照与回滚（时间旅行）
+
+外部驱动器存的是追加日志：能追加、能截断，但无法回答「三轮之前这个会话是什么样」，也无法撤销一次糟糕的回合。`pkg/memory/snapshot` 补上这一层，且**不改动 `core.Memory` 接口**：
+
+```go
+snaps := snapshot.New(driver, snapshot.Options{}) // 直接包 Driver，与 memory 视图共享同一存储
+
+entry, err := snaps.Capture(ctx, "session-1", "before-tool-call")
+// ... 模型跑了一轮，结果不理想 ...
+if _, err := snaps.Rollback(ctx, "session-1", entry.ID); err != nil {
+	return err
+}
+
+list, err := snaps.List(ctx, "session-1")  // 快照列表，最新在前
+err = snaps.Delete(ctx, "session-1", entry.ID)
+```
+
+| 参数/方法 | 说明 |
+|---|---|
+| `New(driver, Options{Codec, MaxPerSession, Prefix})` | `MaxPerSession` 默认 20，超出淘汰最旧 |
+| `Capture(ctx, sessionID, label)` | 记录当前全部消息，返回 `Entry{ID, Label, MessageCount, CreatedAt}` |
+| `Rollback(ctx, sessionID, snapshotID)` | **破坏性**：用快照内容替换会话日志；目标不存在返回 `ErrNoSnapshot` |
+| `List` / `Delete` | 枚举（最新在前）与删除单条 |
+
+要点：
+
+- 快照通过同一个 `Codec` 编码，**加密时快照也是密文**（测试覆盖）
+- 快照存在派生的 `snapshot:<sessionID>` 键下，**不会混入对话消息**
+- 回滚是破坏性的（这正是它的目的）；想保留当前状态就先 `Capture` 一次
+- 恢复时逐字节透传原始载荷，不重新编码
+
+### 长期记忆与向量检索
+
+前面所有内容解决的是「这次对话记得住」；`pkg/ltm` 解决「下次还记得你」。两者刻意分开：会话历史是**有序日志按时间读**，长期记忆是**无序事实按相关性读**。
+
+```go
+store := ltm.NewMemoryStore(ltm.MemoryOptions{MaxFactsPerNamespace: 1000})
+mem := ltm.New(store, ltm.Options{
+	Embedder:  myEmbedder,   // 可选：不配则退化为关键词匹配
+	Extractor: myExtractor,  // 可选：不配则只支持显式 Remember
+})
+
+// 显式记住一条事实
+fact, err := mem.Remember(ctx, userID, "用户对花生过敏", map[string]string{"source": "session-42"})
+
+// 按相关性召回
+facts, err := mem.Recall(ctx, userID, "推荐个餐厅", 5)
+if prompt := ltm.Prompt(facts); prompt != "" {
+	// 作为 system 消息注入，模型即可看到长期上下文
+	messages = append(messages, core.Message{Role: core.RoleSystem, Content: prompt})
+}
+
+// 对话结束后自动抽取事实（配合 Extractor 使用）
+learned, err := mem.Learn(ctx, userID, conversation)
+
+// 管理接口
+err = mem.Forget(ctx, userID, fact.ID)
+list, err := mem.List(ctx, userID, 20)
+err = store.Clear(ctx, userID)
+```
+
+| 概念 | 说明 |
+|---|---|
+| `Fact` | 一条事实：`ID` / `Namespace` / `Text` / `Metadata` / 时间戳 / `Score` |
+| `Namespace` | 隔离维度（通常 user ID）；**跨命名空间永远不可见**，空命名空间直接报错 |
+| `Store` | 存储接口：`Upsert` / `Search` / `List` / `Delete` / `Clear` |
+| `MemoryStore` | 内置进程内实现，带向量检索 + 容量上限 |
+| `pgvector.Store` | PostgreSQL + pgvector 实现，跨进程共享的真·向量检索 |
+| `Embedder` | 文本转向量；`EmbedderFunc` 可一行适配任意厂商 |
+| `Extractor` | 对话蒸馏成事实；`ExtractorFunc` 同理 |
+| `Prompt(facts)` | 把召回结果渲染成 system 提示片段 |
+| `KeywordScore` | 导出的关键词评分函数，供外部 Store 实现做一致的降级排序 |
+
+#### pgvector 后端（PostgreSQL 向量检索）
+
+`pkg/ltm/pgvector` 把长期记忆放进带 pgvector 扩展的 PostgreSQL——跨进程共享、持久化、SQL 级余弦排序。向量以 pgvector 文本格式（`'[1,2,3]'::vector`）写入，**零额外客户端依赖**：
+
+```go
+store, err := pgvector.NewFromURL(ctx, "postgres://user:pass@host/db", pgvector.Options{
+	Dim:    1536, // 向量维度，建表时固定；换 embedding 厂商需新建表
+	Schema: "agent",
+})
+if err != nil {
+	return err
+}
+defer store.Close()
+if err := store.Migrate(ctx); err != nil { // 建扩展 + 建表，幂等；连接角色需有建扩展权限
+	return err
+}
+mem := ltm.New(store, ltm.Options{Embedder: myEmbedder})
+```
+
+行为规则与进程内实现严格对齐：
+
+- **维度不匹配降级为 NULL 向量**：换 embedding 厂商时旧事实仍可关键词召回，写入不失败
+- **非有限值（NaN/Inf）同样存 NULL**：pgvector 会拒绝，宁可丢排序不能丢事实
+- **向量检索在 SQL 内完成**（`ORDER BY embedding <=> $query`），关键词降级在 Go 侧用共享的 `KeywordScore` 排序——与内置实现同一套评分
+- 连接角色必须是库 owner 或有 `CREATE EXTENSION` 权限（`Migrate` 会给出明确错误提示）
+
+设计要点：
+
+- **去重靠稳定 ID**：同一事实重复学习只会更新一行（`namespace + 归一化文本` 的哈希），不需要额外调用 LLM 做 merge 决策
+- **降级不丢数据**：embedding 失败时事实仍然存储、仍可关键词召回——丢掉用户的偏好比排序变差更糟
+- **单一策略排序**：一次调用内要么全用向量相似度、要么全用关键词，避免两种分数混在一起不可比
+- **容量上限**：`MaxFactsPerNamespace` 默认 1000，按插入序淘汰（不用时间戳，同纳秒写入会排序不稳定）
+- **维度不匹配不 panic**：换 embedding 厂商导致维度变化时相似度为 0，该条被过滤
+
+#### 实现选型
+
 | 实现 | 持久化 | 内存占用 | 长会话行为 | 适用场景 |
 |---|---|---|---|---|
 | `Persistent` | JSONL / 会话 | 有界（LRU 驻留） | 超预算截断最旧 | **生产默认** |
@@ -992,8 +1190,13 @@ go run github.com/Lookfukc/tt-agent/cmd/server@latest \
 | `--prompt` | string | 空 | 默认系统提示词 |
 | `--enable-httpfetch` | bool | `false` | 注册 `http_fetch` 工具（SSRF 面，默认关） |
 | `--httpfetch-allow-private` | bool | `false` | 放行 `http_fetch` 访问内网 |
-| `--memory-dir` | string | 空 | 会话记忆目录；空则用共享临时目录 |
-| `--memory-max-loaded` | int | `1024` | 内存驻留会话上限，超出按 LRU 卸载 |
+| `--memory-type` | string | `file` | 会话记忆后端：`file` / `sqlite` / `redis` / `postgres` |
+| `--memory-dir` | string | 空 | `file` 后端：会话目录；空则用共享临时目录 |
+| `--memory-max-loaded` | int | `1024` | `file` 后端：内存驻留会话上限，超出按 LRU 卸载 |
+| `--memory-dsn` | string | 空 | `sqlite` 传文件路径；`redis` 传 `redis://host:port/db`；`postgres` 传连接串 |
+| `--memory-redis-prefix` | string | 空 | `redis` 后端键前缀（默认 `agent:mem:`） |
+| `--memory-ttl` | duration | `0` | 会话保留期：`redis` 原生过期；`sqlite`/`postgres` 由清扫协程执行（`0` = 永久保留） |
+| `--memory-prune-every` | duration | `5m` | `sqlite`/`postgres`：空闲会话清扫周期 |
 
 多厂商按请求路由的场景，写自己的 `main` 注册多家后用 `entry.NewServer`。
 
@@ -2068,6 +2271,12 @@ go test ./...         # 全量
 go test -race ./test/ # 竞态检测
 ```
 
+存储驱动测试需要外部服务时按环境变量启用，未设置则优雅跳过：
+
+| 环境变量 | 作用 |
+|---|---|
+| `TEST_POSTGRES_DSN` | 启用 Postgres 驱动契约测试 + pgvector 长期记忆测试（如 `postgres://user:pass@localhost:5432/db?sslmode=disable`），CI 应始终设置，使四后端一致性保证覆盖全部实现 |
+
 白盒测试（需要访问未导出符号时）按 Go 惯例留在源码包内的 `xxx_test.go`。
 
 ---
@@ -2083,8 +2292,15 @@ pkg/
 │   ├── provider/    厂商配置、注册表、命名 quirks、定价
 │   └── protocol/    OpenAI / Anthropic / Gemini 三协议实现
 ├── agent/           ReAct 循环、无状态模式
-├── memory/          会话记忆（Persistent / Summary / TTL）
+├── memory/          会话记忆
+│   ├── memorystore/ 驱动契约（Codec / Driver / Store）+ 加密编解码
+│   ├── redis/       Redis 驱动（原生 TTL）
+│   ├── sqlite/      SQLite 驱动（单文件、多进程、纯 Go）
+│   ├── postgres/    PostgreSQL 驱动（schema 隔离）
+│   ├── snapshot/    快照与回滚（时间旅行）
 │   └── memorytest/  测试专用进程内实现
+├── ltm/             长期记忆：事实抽取 + 向量检索 + 命名空间隔离
+│   └── pgvector/    PostgreSQL + pgvector 向量存储后端
 ├── tools/           工具注册表
 │   ├── builtin/     calculator / clock / http_fetch
 │   └── mcp/         MCP 客户端（stdio / Streamable HTTP）
