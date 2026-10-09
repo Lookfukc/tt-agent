@@ -77,6 +77,7 @@ func NewFromURL(ctx context.Context, url string, opts Options) (*Driver, error) 
 // agent.NewLoop, also satisfying memory.Splitter, Trimmer and
 // SummaryStore.
 func (d *Driver) Memory(opts memorystore.Options) *memorystore.Store {
+	opts.Backend = memorystore.DefaultBackend("postgres", opts.Backend)
 	return memorystore.New(d, opts)
 }
 

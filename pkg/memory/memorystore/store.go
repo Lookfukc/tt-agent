@@ -6,6 +6,7 @@ import (
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
 	"github.com/Lookfukc/tt-agent/pkg/internal/sessionlog"
+	"github.com/Lookfukc/tt-agent/pkg/observer"
 )
 
 // Driver is the storage-specific half of a memory backend.
@@ -106,9 +107,11 @@ func Unwrap(d Driver) Driver {
 // in-process caches that memory.Persistent uses are safe only because
 // it owns its files exclusively.
 type Store struct {
-	driver  Driver
-	codec   Codec
-	counter core.TokenCounter
+	driver   Driver
+	codec    Codec
+	counter  core.TokenCounter
+	observer observer.MemoryObserver
+	backend  string
 
 	// maxScan caps how many records a single read pulls from the
 	// driver, so a pathologically long session cannot exhaust memory
@@ -133,6 +136,16 @@ type Options struct {
 
 	// MaxScan caps records fetched per read. <=0 means the default.
 	MaxScan int
+
+	// Observer receives lifecycle events (appended / trimmed /
+	// cleared / summary). Emission is fire-and-forget; a slow
+	// observer never slows a write. Drivers fill Backend when unset.
+	Observer observer.MemoryObserver
+
+	// Backend names the backend in emitted events. Each driver's
+	// Memory method sets it automatically ("redis", "sqlite", …);
+	// set it explicitly only for custom drivers.
+	Backend string
 }
 
 // New builds a Store over a driver.
@@ -149,7 +162,14 @@ func New(driver Driver, opts Options) *Store {
 	if maxScan <= 0 {
 		maxScan = defaultMaxScan
 	}
-	return &Store{driver: driver, codec: codec, counter: counter, maxScan: maxScan}
+	return &Store{
+		driver:   driver,
+		codec:    codec,
+		counter:  counter,
+		observer: opts.Observer,
+		backend:  opts.Backend,
+		maxScan:  maxScan,
+	}
 }
 
 // Driver exposes the underlying driver.
@@ -175,7 +195,11 @@ func (s *Store) Add(ctx context.Context, sessionID string, msgs ...core.Message)
 		}
 		recs = append(recs, EncodedRecord{Data: data, System: m.Role == core.RoleSystem})
 	}
-	return s.driver.AppendRecords(ctx, sessionID, recs)
+	if err := s.driver.AppendRecords(ctx, sessionID, recs); err != nil {
+		return err
+	}
+	s.emit(observer.EventMessagesAppended, sessionID, map[string]any{"count": len(msgs)})
+	return nil
 }
 
 // Recent returns the most recent messages within the budget.
@@ -217,7 +241,11 @@ func (s *Store) Trim(ctx context.Context, sessionID string, n int) error {
 	if n <= 0 {
 		return nil
 	}
-	return s.driver.TrimMessages(ctx, sessionID, n)
+	if err := s.driver.TrimMessages(ctx, sessionID, n); err != nil {
+		return err
+	}
+	s.emit(observer.EventSessionTrimmed, sessionID, map[string]any{"count": n})
+	return nil
 }
 
 // Clear removes the session entirely.
@@ -225,7 +253,40 @@ func (s *Store) Clear(ctx context.Context, sessionID string) error {
 	if !ValidSessionID(sessionID) {
 		return ErrInvalidSessionID
 	}
-	return s.driver.DeleteSession(ctx, sessionID)
+	if err := s.driver.DeleteSession(ctx, sessionID); err != nil {
+		return err
+	}
+	s.emit(observer.EventSessionCleared, sessionID, nil)
+	return nil
+}
+
+// DefaultBackend fills the event label for a driver unless the caller
+// already set one. Each driver passes its own name ("redis", "sqlite",
+// "postgres"), keeping events self-describing without callers doing
+// anything.
+func DefaultBackend(driverName, explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	return driverName
+}
+
+// emit forwards a lifecycle event to the observer, if any.
+//
+// Deliberately after the write succeeded: events describe durable
+// state changes, and the helper being nil-capable keeps call sites
+// unconditional.
+func (s *Store) emit(kind observer.MemoryEventKind, sessionID string, detail map[string]any) {
+	if s.observer == nil {
+		return
+	}
+	s.observer.OnMemoryEvent(observer.MemoryEvent{
+		Kind:    kind,
+		Backend: s.backend,
+		Session: sessionID,
+		At:      time.Now(),
+		Detail:  detail,
+	})
 }
 
 // SaveSummary persists the summary, satisfying memory.SummaryStore.
@@ -237,7 +298,11 @@ func (s *Store) SaveSummary(ctx context.Context, sessionID string, covered int, 
 	if err != nil {
 		return err
 	}
-	return s.driver.SaveSummary(ctx, sessionID, EncodedSummary{Data: data})
+	if err := s.driver.SaveSummary(ctx, sessionID, EncodedSummary{Data: data}); err != nil {
+		return err
+	}
+	s.emit(observer.EventSummarySaved, sessionID, map[string]any{"covered": covered})
+	return nil
 }
 
 // LoadSummary reads the summary, satisfying memory.SummaryStore.

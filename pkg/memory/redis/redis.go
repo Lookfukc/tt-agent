@@ -85,6 +85,7 @@ func NewFromURL(ctx context.Context, url string, opts Options) (*Driver, error) 
 // and memory.SummaryStore, so it can be decorated with
 // memory.NewSummary / memory.NewTTL / memory.NewCompactingSummary.
 func (d *Driver) Memory(opts memorystore.Options) *memorystore.Store {
+	opts.Backend = memorystore.DefaultBackend("redis", opts.Backend)
 	return memorystore.New(d, opts)
 }
 

@@ -883,10 +883,16 @@ err = snaps.Delete(ctx, "session-1", entry.ID)
 
 | 参数/方法 | 说明 |
 |---|---|
-| `New(driver, Options{Codec, MaxPerSession, Prefix})` | `MaxPerSession` 默认 20，超出淘汰最旧 |
+| `New(driver, Options{Codec, MaxPerSession, Prefix, Observer, Backend})` | `MaxPerSession` 默认 20，超出淘汰最旧 |
 | `Capture(ctx, sessionID, label)` | 记录当前全部消息，返回 `Entry{ID, Label, MessageCount, CreatedAt}` |
 | `Rollback(ctx, sessionID, snapshotID)` | **破坏性**：用快照内容替换会话日志；目标不存在返回 `ErrNoSnapshot` |
+| `RollbackSafe(ctx, sessionID, snapshotID, safetyLabel)` | **非破坏性**：先把当前状态存为安全快照再回滚，返回 `(restored, safety)` 两个 Entry——后悔了用 `safety.ID` 再滚一次即撤销本次回滚 |
 | `List` / `Delete` | 枚举（最新在前）与删除单条 |
+
+`RollbackSafe` 的两条保证：
+
+- **目标 ID 写错时不产生垃圾快照**：先校验目标存在，不存在直接 `ErrNoSnapshot`，快照日志不被污染
+- **捕获与回滚同锁串行**：两步之间不可能插入并发写入，被丢弃的状态必然完整保存在安全快照里——这正是该方法存在的意义
 
 要点：
 
@@ -936,6 +942,35 @@ err = store.Clear(ctx, userID)
 | `Extractor` | 对话蒸馏成事实；`ExtractorFunc` 同理 |
 | `Prompt(facts)` | 把召回结果渲染成 system 提示片段 |
 | `KeywordScore` | 导出的关键词评分函数，供外部 Store 实现做一致的降级排序 |
+
+#### 开箱即用的 Embedder（`pkg/ltm/embeddings`）
+
+三个适配器共享一个 HTTP 内核，只差认证头，直接实现 `ltm.Embedder`：
+
+```go
+// OpenAI 兼容：OpenAI / DeepSeek / GLM / 本地 ollama、vLLM（Bearer 认证）
+emb := embeddings.NewOpenAICompatible("https://api.openai.com/v1", apiKey, "text-embedding-3-small")
+
+// Anthropic（Voyage 驱动的 /v1/embeddings，x-api-key + anthropic-version 认证）
+emb = embeddings.NewAnthropic(apiKey, "voyage-3-large")
+
+// Google Gemini（:embedContent 端点，x-goog-api-key 认证）
+emb = embeddings.NewGemini(apiKey, "gemini-embedding-001")
+
+mem := ltm.New(store, ltm.Options{Embedder: emb})
+```
+
+| 选项 | 说明 |
+|---|---|
+| `WithHTTPClient(hc)` | 注入自定义 HTTP 客户端（代理 / 测试） |
+| `WithBaseURL(base)` | 覆盖默认 API 根地址（网关 / 本地代理） |
+
+行为要点：
+
+- 错误信息**始终携带 provider 响应体片段**——预览版 API 字段漂移时不需要抓包就能定位
+- 空文本直接返回 nil（不发起请求），与 ltm 门面的降级语义对齐
+- 30 秒默认超时，context 取消即时生效；并发安全
+- ⚠️ **Anthropic 端点为预览版**，模型名/字段可能演进；**换 Embedder 通常意味着换向量维度**，配合 pgvector 时需新建表（`Dim` 建表时固定）
 
 #### pgvector 后端（PostgreSQL 向量检索）
 
@@ -1477,6 +1512,53 @@ func (t *MemoryTracer) TraceCount() int
 ```
 
 Span 树结构：`agent.run` → `agent.iter` → `llm.stream` / `tool.exec`；编排层另有 `workflow.run` → `workflow.step`。
+
+#### 记忆事件与 Webhook
+
+记忆子系统全链路可观测：会话存储、快照、长期记忆都支持注入 `Observer`，变更即发事件。
+
+```go
+// 第一层：进程内订阅（异步分发，绝不阻塞记忆写路径）
+bus := observer.NewMemoryEventBus(1024, observer.MemoryObserverFunc(func(e observer.MemoryEvent) {
+    log.Printf("[%s] %s session=%s detail=%v", e.Backend, e.Kind, e.Session, e.Detail)
+}))
+defer bus.Close()
+
+store := d.Memory(memorystore.Options{Observer: bus})     // 任意驱动
+snaps := snapshot.New(driver, snapshot.Options{Observer: bus})
+mem := ltm.New(ltmStore, ltm.Options{Observer: bus})
+
+// 第二层：转发到 HTTP（实现同一个接口，直接挂进总线或单独注入）
+fwd := webhook.New(webhook.Config{
+    URL:         "https://ops.example.com/agent-memory",
+    Secret:      "hmac-key",   // 每个请求带 X-TT-Agent-Signature（HMAC-SHA256）
+    MaxRetries:  3,            // 指数退避重试；5xx 重试、4xx 立即放弃
+    QueueSize:   256,          // 有界队列，满载丢最旧并计数
+})
+defer fwd.Close()
+bus2 := observer.NewMemoryEventBus(64, fwd) // 或直接 fwd 当 Observer 注入
+```
+
+**事件清单**：
+
+| Kind | 来源 | Detail 携带 |
+|---|---|---|
+| `messages_appended` | 会话存储 | `count` |
+| `session_trimmed` | 会话存储 | `count` |
+| `session_cleared` | 会话存储 | — |
+| `summary_saved` | 会话存储 | `covered` |
+| `snapshot_captured` | 快照 | `snapshot_id` / `label` / `messages` |
+| `session_rolled_back` | 快照 | `target`（RollbackSafe 另带 `safety`） |
+| `fact_remembered` | 长期记忆 | `fact_id` |
+| `fact_forgotten` | 长期记忆 | `fact_id` |
+
+三条设计纪律：
+
+1. **事件绝不携带消息内容**——只有计数与 ID。Webhook 出进程时不会把对话泄露给配置错误的 URL
+2. **发射永不阻塞写路径**——慢观察者（测试里用挂起的 handler 验证）不拖慢 `Add`；总线满载丢弃并计数（`bus.Drops()`），Webhook 队列满载丢最旧
+3. **观察者 panic 不杀分发器**——单个坏 sink 被隔离，其余观察者照常收到事件
+
+Webhook 接收方验签示例：用相同 Secret 对**原始请求体**做 HMAC-SHA256，与 `X-TT-Agent-Signature` 头比对。
 
 ---
 
@@ -2232,6 +2314,47 @@ Agent 循环恒走 `ChatStream`。`core.NewPipeline` 上的 `Logging` / `Retry` 
 
 ---
 
+## 性能基准
+
+机器：Intel Core Ultra 9 185H（22 线程），Windows，SQLite/文件走临时目录，Redis 为 **miniredis（进程内，无网络往返）**，Postgres 为 Docker 本机真实实例。数字用于**后端间相对比较**，不是绝对承诺。复现：`go test ./pkg/memory/... ./pkg/ltm/... -run '^$' -bench . -benchtime 2s`（Postgres 需设 `TEST_POSTGRES_DSN`）。
+
+**写入吞吐（Add，单条 ~60 字符消息）**
+
+| 后端 | ns/op | 说明 |
+|---|---:|---|
+| Redis (miniredis) | 122K | 无网络口径；真实 Redis 加一次 RTT |
+| File (JSONL) | 255K | 追加写 + fsync |
+| SQLite | 458K | 单事务插入 |
+| Postgres（真实） | 1,584K | 本机 Docker；跨网络更高 |
+
+**读取（Recent，全窗口物化）随会话长度线性增长**
+
+| 后端 | 100 条 | 1,000 条 | 5,000 条 |
+|---|---:|---:|---:|
+| File | — | 151K | — |
+| SQLite | 236K | 2,159K | 4,753K |
+| Redis (miniredis) | 397K | 2,908K | 14,304K |
+| Postgres（真实） | — | 3,857K | — |
+
+线性增长正是 `maxScan=2000` 默认值存在的原因：它把单次请求组装的最坏耗时钉在毫秒量级；5,000 条的窗口在 Redis 上要 14ms——超长会话的老消息留在窗口外是设计取舍，不是缺陷。
+
+**Trim（1,000 条会话删 10 条）**：SQLite 606K / Postgres 1,049K / Redis 1,957K（Lua 服务端整段执行）
+
+**加密开销（AES-256-GCM，每条消息）**：明文编码 535ns → 加密编码 979ns；明文解码 1,137ns → 加密解码 1,476ns。**约 +0.5µs/条**，对比存储 I/O（122µs~1.6ms）是纯噪音——加密是免费的。
+
+**长期记忆（进程内实现）**
+
+| 操作 | 100 事实 | 1,000 事实 | 5,000 事实 |
+|---|---:|---:|---:|
+| 关键词召回 | 71K | 989K | 6,322K |
+| 向量召回（64 维） | — | 1,184K | 8,382K |
+
+`Remember` 写入 6.5µs。千级事实召回在 1ms 内；到五千条逼近 10ms 时，换 `pgvector.Store`（SQL 内排序，量级更稳）。
+
+**快照**：Capture 100 条会话 ≈ 9ms；1,000 条 ≈ 112ms——随会话长度线性（快照是全量副本），配合 `MaxPerSession`（默认 20）封顶总占用。
+
+---
+
 ## 测试
 
 测试统一放在独立的 `test/` 模块，全部黑盒测试，只依赖导出 API：
@@ -2300,13 +2423,15 @@ pkg/
 │   ├── snapshot/    快照与回滚（时间旅行）
 │   └── memorytest/  测试专用进程内实现
 ├── ltm/             长期记忆：事实抽取 + 向量检索 + 命名空间隔离
+│   ├── embeddings/  开箱即用 Embedder（OpenAI 兼容 / Anthropic / Gemini）
 │   └── pgvector/    PostgreSQL + pgvector 向量存储后端
 ├── tools/           工具注册表
 │   ├── builtin/     calculator / clock / http_fetch
 │   └── mcp/         MCP 客户端（stdio / Streamable HTTP）
 ├── entry/           HTTP / SSE / WS / gRPC 入口
 ├── orchestrator/    工作流编排、检查点、断点续跑
-└── observer/        指标聚合、内存追踪
+├── observer/        指标聚合、内存追踪、记忆事件总线
+│   └── webhook/     事件 HTTP 转发（HMAC 签名 + 重试）
 test/                黑盒测试
 ```
 

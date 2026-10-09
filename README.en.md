@@ -886,10 +886,16 @@ err = snaps.Delete(ctx, "session-1", entry.ID)
 
 | Parameter / method | Description |
 |---|---|
-| `New(driver, Options{Codec, MaxPerSession, Prefix})` | `MaxPerSession` defaults to 20; older snapshots are evicted |
+| `New(driver, Options{Codec, MaxPerSession, Prefix, Observer, Backend})` | `MaxPerSession` defaults to 20; older snapshots are evicted |
 | `Capture(ctx, sessionID, label)` | Records all current messages; returns `Entry{ID, Label, MessageCount, CreatedAt}` |
 | `Rollback(ctx, sessionID, snapshotID)` | **Destructive**: replaces the session log with the snapshot; `ErrNoSnapshot` when missing |
+| `RollbackSafe(ctx, sessionID, snapshotID, safetyLabel)` | **Non-destructive**: captures the current state as a safety snapshot first, then rolls back, returning `(restored, safety)` — rolling back to `safety.ID` undoes the rollback |
 | `List` / `Delete` | Enumeration (newest first) and single-snapshot removal |
+
+`RollbackSafe` guarantees two things:
+
+- **A mistyped target ID leaves no junk snapshot**: the target is validated first; a missing ID returns `ErrNoSnapshot` without polluting the snapshot log
+- **Capture and rollback are serialized under one lock**: no concurrent write can land between the two steps, so the discarded state is guaranteed to be intact inside the safety snapshot — which is the entire point of the method
 
 Key points:
 
@@ -939,6 +945,35 @@ err = store.Clear(ctx, userID)
 | `Extractor` | Distills conversations into facts; `ExtractorFunc` likewise |
 | `Prompt(facts)` | Renders recalled facts as a system-prompt fragment |
 | `KeywordScore` | Exported keyword-scoring function so external Store implementations degrade with consistent ranking |
+
+#### Ready-to-Use Embedders (`pkg/ltm/embeddings`)
+
+Three adapters share one HTTP kernel and differ only in authentication; each implements `ltm.Embedder` directly:
+
+```go
+// OpenAI-compatible: OpenAI / DeepSeek / GLM / local ollama, vLLM (Bearer auth)
+emb := embeddings.NewOpenAICompatible("https://api.openai.com/v1", apiKey, "text-embedding-3-small")
+
+// Anthropic (Voyage-powered /v1/embeddings; x-api-key + anthropic-version auth)
+emb = embeddings.NewAnthropic(apiKey, "voyage-3-large")
+
+// Google Gemini (:embedContent endpoint; x-goog-api-key auth)
+emb = embeddings.NewGemini(apiKey, "gemini-embedding-001")
+
+mem := ltm.New(store, ltm.Options{Embedder: emb})
+```
+
+| Option | Description |
+|---|---|
+| `WithHTTPClient(hc)` | Inject a custom HTTP client (proxies / tests) |
+| `WithBaseURL(base)` | Override the default API root (gateways / local proxies) |
+
+Behavior notes:
+
+- Error messages **always carry a snippet of the provider's response body** — a schema drift in a preview API is diagnosable without a packet capture
+- Empty text returns nil without a request, matching the facade's degrade semantics
+- 30-second default timeout, immediate context cancellation, safe for concurrent use
+- ⚠️ **The Anthropic endpoint is a preview**; model names and fields may evolve. **Switching embedders usually means switching vector dimensions** — with pgvector that means a new table (`Dim` is fixed at creation)
 
 #### The pgvector Backend (PostgreSQL Vector Search)
 
@@ -1469,6 +1504,53 @@ func (t *MemoryTracer) TraceCount() int
 ```
 
 Span tree structure: `agent.run` → `agent.iter` → `llm.stream` / `tool.exec`; the orchestration layer additionally has `workflow.run` → `workflow.step`.
+
+#### Memory Events and Webhooks
+
+The memory subsystem is observable end to end: session stores, snapshots and long-term memory all accept an `Observer` and emit events on change.
+
+```go
+// Layer 1: in-process subscription (async fan-out; never blocks memory writes)
+bus := observer.NewMemoryEventBus(1024, observer.MemoryObserverFunc(func(e observer.MemoryEvent) {
+    log.Printf("[%s] %s session=%s detail=%v", e.Backend, e.Kind, e.Session, e.Detail)
+}))
+defer bus.Close()
+
+store := d.Memory(memorystore.Options{Observer: bus})   // any driver
+snaps := snapshot.New(driver, snapshot.Options{Observer: bus})
+mem := ltm.New(ltmStore, ltm.Options{Observer: bus})
+
+// Layer 2: forward over HTTP (implements the same interface)
+fwd := webhook.New(webhook.Config{
+    URL:        "https://ops.example.com/agent-memory",
+    Secret:     "hmac-key",  // each request carries X-TT-Agent-Signature (HMAC-SHA256)
+    MaxRetries: 3,           // exponential backoff; 5xx retries, 4xx gives up immediately
+    QueueSize:  256,         // bounded queue; drops the oldest when full and counts it
+})
+defer fwd.Close()
+bus2 := observer.NewMemoryEventBus(64, fwd) // or inject fwd as the Observer directly
+```
+
+**Event catalog**:
+
+| Kind | Source | Detail carries |
+|---|---|---|
+| `messages_appended` | session store | `count` |
+| `session_trimmed` | session store | `count` |
+| `session_cleared` | session store | — |
+| `summary_saved` | session store | `covered` |
+| `snapshot_captured` | snapshots | `snapshot_id` / `label` / `messages` |
+| `session_rolled_back` | snapshots | `target` (RollbackSafe adds `safety`) |
+| `fact_remembered` | long-term memory | `fact_id` |
+| `fact_forgotten` | long-term memory | `fact_id` |
+
+Three design rules:
+
+1. **Events never carry message content** — only counts and IDs. A webhook leaving the process cannot leak conversations to a misconfigured URL
+2. **Emission never blocks the write path** — a slow observer (verified in tests with a hanging handler) does not slow `Add`; a saturated bus drops and counts (`bus.Drops()`), a saturated webhook queue drops the oldest
+3. **A panicking observer cannot kill the dispatcher** — one bad sink is isolated; the rest keep receiving events
+
+Receivers verify the signature by HMAC-SHA256'ing the **raw request body** with the same secret and comparing against the `X-TT-Agent-Signature` header.
 
 ---
 
@@ -2224,6 +2306,47 @@ It faces **model output**, and without filtering it is an SSRF surface (a model 
 
 ---
 
+## Benchmarks
+
+Machine: Intel Core Ultra 9 185H (22 threads), Windows; SQLite and the file backend use temp directories; Redis numbers use **miniredis (in-process, no network round-trip)**; Postgres is a real Docker instance on localhost. Numbers are for **relative comparison between backends**, not absolute promises. Reproduce with `go test ./pkg/memory/... ./pkg/ltm/... -run '^$' -bench . -benchtime 2s` (Postgres needs `TEST_POSTGRES_DSN`).
+
+**Write throughput (Add, one ~60-char message)**
+
+| Backend | ns/op | Note |
+|---|---:|---|
+| Redis (miniredis) | 122K | no-network figure; real Redis adds an RTT |
+| File (JSONL) | 255K | append + fsync |
+| SQLite | 458K | single-transaction insert |
+| Postgres (real) | 1,584K | localhost Docker; higher across a network |
+
+**Reads (Recent, full-window materialization) grow linearly with session length**
+
+| Backend | 100 msgs | 1,000 msgs | 5,000 msgs |
+|---|---:|---:|---:|
+| File | — | 151K | — |
+| SQLite | 236K | 2,159K | 4,753K |
+| Redis (miniredis) | 397K | 2,908K | 14,304K |
+| Postgres (real) | — | 3,857K | — |
+
+The linear growth is exactly why `maxScan=2000` exists as the default: it pins the worst-case request assembly at milliseconds. A 5,000-message window costs 14ms on Redis — leaving older messages outside the window is a deliberate trade-off, not an oversight.
+
+**Trim (10 removed from a 1,000-message session)**: SQLite 606K / Postgres 1,049K / Redis 1,957K (the whole Lua script runs server-side).
+
+**Encryption overhead (AES-256-GCM, per message)**: plain encode 535ns → encrypted 979ns; plain decode 1,137ns → encrypted 1,476ns. **~+0.5µs per message** — pure noise next to storage I/O (122µs–1.6ms). Encryption is free.
+
+**Long-term memory (in-process store)**
+
+| Operation | 100 facts | 1,000 facts | 5,000 facts |
+|---|---:|---:|---:|
+| Keyword recall | 71K | 989K | 6,322K |
+| Vector recall (64-dim) | — | 1,184K | 8,382K |
+
+`Remember` writes at 6.5µs. Recall stays under 1ms at a thousand facts; when five thousand approaches 10ms, move to `pgvector.Store` (SQL-side ranking holds its scale better).
+
+**Snapshots**: capturing a 100-message session ≈ 9ms; 1,000 messages ≈ 112ms — linear in session length (a snapshot is a full copy), with `MaxPerSession` (default 20) bounding the total.
+
+---
+
 ## Testing
 
 Tests live in a separate `test/` module and are all black-box, relying only on exported APIs:
@@ -2292,13 +2415,15 @@ pkg/
 │   ├── snapshot/    snapshots and rollback (time travel)
 │   └── memorytest/  test-only in-process implementation
 ├── ltm/             long-term memory: fact extraction + vector search + namespaces
+│   ├── embeddings/  ready-to-use embedders (OpenAI-compatible / Anthropic / Gemini)
 │   └── pgvector/    PostgreSQL + pgvector vector store backend
 ├── tools/           tool registry
 │   ├── builtin/     calculator / clock / http_fetch
 │   └── mcp/         MCP client (stdio / Streamable HTTP)
 ├── entry/           HTTP / SSE / WS / gRPC entry points
 ├── orchestrator/    workflow orchestration, checkpoints, resume from checkpoint
-└── observer/        metric aggregation, in-memory tracing
+├── observer/        metric aggregation, in-memory tracing, memory event bus
+│   └── webhook/     event forwarding over HTTP (HMAC signing + retries)
 test/                black-box tests
 ```
 

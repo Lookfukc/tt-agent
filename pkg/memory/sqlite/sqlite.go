@@ -107,6 +107,7 @@ func buildDSN(path string, opts Options) (string, error) {
 // Memory wraps the driver as a core.Memory implementation, also
 // satisfying memory.Splitter, Trimmer and SummaryStore.
 func (d *Driver) Memory(opts memorystore.Options) *memorystore.Store {
+	opts.Backend = memorystore.DefaultBackend("sqlite", opts.Backend)
 	return memorystore.New(d, opts)
 }
 

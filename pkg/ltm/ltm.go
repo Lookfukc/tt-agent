@@ -18,6 +18,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/Lookfukc/tt-agent/pkg/observer"
 )
 
 // Fact is one remembered statement about a subject.
@@ -127,6 +129,8 @@ type Memory struct {
 	store     Store
 	embedder  Embedder
 	extractor Extractor
+	observer  observer.MemoryObserver
+	backend   string
 
 	// defaultLimit caps recall size when the caller does not specify one.
 	defaultLimit int
@@ -144,6 +148,14 @@ type Options struct {
 
 	// DefaultLimit is the recall size when a caller passes limit <= 0.
 	DefaultLimit int
+
+	// Observer receives fact lifecycle events (remembered /
+	// forgotten). Emission is fire-and-forget.
+	Observer observer.MemoryObserver
+
+	// Backend labels emitted events (e.g. "memory" for the in-process
+	// store, "pgvector" for Postgres).
+	Backend string
 }
 
 // defaultRecallLimit bounds a recall when the caller does not say.
@@ -159,6 +171,8 @@ func New(store Store, opts Options) *Memory {
 		store:        store,
 		embedder:     opts.Embedder,
 		extractor:    opts.Extractor,
+		observer:     opts.Observer,
+		backend:      opts.Backend,
 		defaultLimit: limit,
 	}
 }
@@ -196,7 +210,25 @@ func (m *Memory) Remember(ctx context.Context, namespace, text string, metadata 
 	if err != nil {
 		vector = nil
 	}
-	return m.store.Upsert(ctx, fact, vector)
+	stored, err := m.store.Upsert(ctx, fact, vector)
+	if err == nil {
+		m.emit(observer.EventFactRemembered, namespace, map[string]any{"fact_id": stored.ID})
+	}
+	return stored, err
+}
+
+// emit forwards a fact lifecycle event, if an observer is set.
+func (m *Memory) emit(kind observer.MemoryEventKind, namespace string, detail map[string]any) {
+	if m.observer == nil {
+		return
+	}
+	m.observer.OnMemoryEvent(observer.MemoryEvent{
+		Kind:    kind,
+		Backend: m.backend,
+		Session: namespace,
+		At:      time.Now(),
+		Detail:  detail,
+	})
 }
 
 // Recall returns the facts most relevant to a query.
@@ -250,7 +282,11 @@ func (m *Memory) Forget(ctx context.Context, namespace, id string) error {
 	if m.store == nil {
 		return ErrNoStore
 	}
-	return m.store.Delete(ctx, namespace, id)
+	if err := m.store.Delete(ctx, namespace, id); err != nil {
+		return err
+	}
+	m.emit(observer.EventFactForgotten, namespace, map[string]any{"fact_id": id})
+	return nil
 }
 
 // List returns the facts stored for a namespace.

@@ -23,7 +23,9 @@ type fixture struct {
 }
 
 // newFixture builds a migrated SQLite-backed fixture.
-func newFixture(t *testing.T) fixture {
+//
+// It takes testing.TB so benchmarks share the same setup.
+func newFixture(t testing.TB) fixture {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "snap.db")
 	d, err := sqlite.New(path, sqlite.Options{})
@@ -176,6 +178,68 @@ func TestRollbackUnknownSnapshotIsReported(t *testing.T) {
 
 	if _, err := f.snaps.Rollback(ctx, "s", "no-such-id"); !errors.Is(err, snapshot.ErrNoSnapshot) {
 		t.Fatalf("err = %v, want ErrNoSnapshot", err)
+	}
+}
+
+// TestRollbackSafeKeepsPreRollbackState is the whole point of the safe
+// variant: after rolling back, the discarded state is still one
+// Rollback away, so a bad decision is reversible.
+func TestRollbackSafeKeepsPreRollbackState(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	_ = f.mem.Add(ctx, "s", core.Message{Role: core.RoleUser, Content: "good turn"})
+	early, err := f.snaps.Capture(ctx, "s", "early")
+	if err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	_ = f.mem.Add(ctx, "s", core.Message{Role: core.RoleUser, Content: "bad turn"})
+
+	restored, safety, err := f.snaps.RollbackSafe(ctx, "s", early.ID, "before-undo")
+	if err != nil {
+		t.Fatalf("RollbackSafe: %v", err)
+	}
+	if restored.ID != early.ID {
+		t.Fatalf("restored = %s, want %s", restored.ID, early.ID)
+	}
+	if safety.Label != "before-undo" || safety.MessageCount != 2 {
+		t.Fatalf("safety entry = %+v", safety)
+	}
+
+	// 回滚后只剩 good turn
+	got, _ := f.mem.Recent(ctx, "s", 1<<20)
+	if len(got) != 1 || got[0].Content != "good turn" {
+		t.Fatalf("after RollbackSafe = %+v", got)
+	}
+
+	// 后悔了：滚回安全快照，bad turn 回来了
+	if _, err := f.snaps.Rollback(ctx, "s", safety.ID); err != nil {
+		t.Fatalf("undo via safety: %v", err)
+	}
+	got, _ = f.mem.Recent(ctx, "s", 1<<20)
+	if len(got) != 2 || got[1].Content != "bad turn" {
+		t.Fatalf("safety rollback did not restore the discarded state: %+v", got)
+	}
+}
+
+// TestRollbackSafeBadTargetLeavesNoSafetySnapshot proves a mistyped
+// target ID fails before capturing, so it cannot litter the snapshot
+// log with pointless entries.
+func TestRollbackSafeBadTargetLeavesNoSafetySnapshot(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_ = f.mem.Add(ctx, "s", core.Message{Role: core.RoleUser, Content: "x"})
+
+	if _, _, err := f.snaps.RollbackSafe(ctx, "s", "typo-id", "safety"); !errors.Is(err, snapshot.ErrNoSnapshot) {
+		t.Fatalf("err = %v, want ErrNoSnapshot", err)
+	}
+	list, err := f.snaps.List(ctx, "s")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("failed RollbackSafe left snapshots behind: %+v", list)
 	}
 }
 
