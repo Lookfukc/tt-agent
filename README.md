@@ -976,7 +976,7 @@ mem := ltm.New(store, ltm.Options{Embedder: emb})
 - 错误信息**始终携带 provider 响应体片段**——预览版 API 字段漂移时不需要抓包就能定位
 - 空文本直接返回 nil（不发起请求），与 ltm 门面的降级语义对齐
 - 30 秒默认超时，context 取消即时生效；并发安全
-- ⚠️ **Anthropic 适配器未对线上端点实测**：编写环境无法访问 Anthropic 域名，实现基于其公开的预览版 API 描述（端点形状已由密闭测试锁定；认证头为 `x-api-key` + `anthropic-version`）。首次真连若字段有漂移，错误信息会带服务端原文，可即时定位
+- ⚠️ **Anthropic 适配器已对线上端点做过部分实测**：`POST /v1/embeddings` 端点存在、认证头方案被服务器按预期处理、错误响应形状（`{"error":{...}}`）与解析器匹配（假 key 探测返回 401/403 而非 404）。**成功路径（真实向量返回、`dimensions` 字段是否被接受）仍未经真 key 验证**——该端点有地区限制（部分地区返回 `403 Request not allowed`），实测需在允许的地区进行；字段若有漂移，错误信息会携带服务端原文，可即时定位
 - ⚠️ **换 Embedder 通常意味着换向量维度**，配合 pgvector 时需新建表（`Dim` 建表时固定）
 
 #### 内置 LLM Extractor（`pkg/ltm/extractor`）

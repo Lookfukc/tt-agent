@@ -979,7 +979,7 @@ Behavior notes:
 - Error messages **always carry a snippet of the provider's response body** — a schema drift in a preview API is diagnosable without a packet capture
 - Empty text returns nil without a request, matching the facade's degrade semantics
 - 30-second default timeout, immediate context cancellation, safe for concurrent use
-- ⚠️ **The Anthropic adapter has not been tested against the live endpoint**: the build environment cannot reach Anthropic domains, and the implementation follows their published preview-API description (endpoint shape locked by hermetic tests; auth via `x-api-key` + `anthropic-version`). If fields have drifted, the first real call's error will carry the server's response for immediate diagnosis
+- ⚠️ **The Anthropic adapter is partially verified against the live endpoint**: `POST /v1/embeddings` exists (a dummy-key probe returns 401/403, not 404), the auth-header scheme is handled as expected, and the error shape (`{"error":{...}}`) matches our parser. **The happy path (real vectors returned, whether the `dimensions` field is accepted) remains unverified with a real key** — the endpoint is region-restricted (some regions get `403 Request not allowed`), so live testing must run from a permitted region; if fields have drifted, the error will carry the server's response for immediate diagnosis
 - ⚠️ **Switching embedders usually means switching vector dimensions** — with pgvector that means a new table (`Dim` is fixed at creation)
 
 #### Built-in LLM Extractor (`pkg/ltm/extractor`)
