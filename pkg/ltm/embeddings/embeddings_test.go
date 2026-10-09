@@ -3,6 +3,7 @@ package embeddings_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,6 +226,35 @@ func TestConcurrentEmbeds(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Fatalf("concurrent embed: %v", err)
+	}
+}
+
+// TestWithDimensionsAppearsInPayload proves the dims option reaches
+// the wire for OpenAI-shaped providers and is omitted when unset.
+func TestWithDimensionsAppearsInPayload(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1]}]}`))
+	}))
+	defer srv.Close()
+
+	c := embeddings.NewOpenAICompatible(srv.URL, "k", "text-embedding-3-small",
+		embeddings.WithDimensions(256))
+	if _, err := c.Embed(context.Background(), "x"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if !strings.Contains(string(body), `"dimensions":256`) {
+		t.Fatalf("dimensions missing from payload: %s", body)
+	}
+
+	// 未设置时不得携带该字段
+	c2 := embeddings.NewOpenAICompatible(srv.URL, "k", "text-embedding-3-small")
+	if _, err := c2.Embed(context.Background(), "x"); err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if strings.Contains(string(body), "dimensions") {
+		t.Fatalf("dimensions leaked without the option: %s", body)
 	}
 }
 

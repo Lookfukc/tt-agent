@@ -34,10 +34,11 @@ type Client struct {
 	httpClient *http.Client
 	endpoint   string
 	model      string
+	dims       int
 	// decorate sets provider-specific auth headers on each request.
 	decorate func(*http.Request)
 	// body builds the request payload; factored per provider shape.
-	body func(model, text string) any
+	body func(model, text string, dims int) any
 	// parse extracts the vector from the response body.
 	parse func(data []byte) ([]float32, error)
 }
@@ -68,6 +69,22 @@ func WithBaseURL(base string) Option {
 	return func(c *Client) {
 		if base != "" {
 			c.endpoint = strings.TrimRight(base, "/") + c.endpointSuffix()
+		}
+	}
+}
+
+// WithDimensions requests a specific output dimensionality.
+//
+// OpenAI's text-embedding-3 family and Anthropic's Voyage models
+// accept a dimensions parameter; trimming the vector shrinks storage
+// and speeds cosine scoring at some quality cost. Providers that
+// reject the field ignore it harmlessly only if they tolerate unknown
+// JSON — otherwise the error carries their response. It has no effect
+// on the Gemini variant (dimension is fixed per model there).
+func WithDimensions(n int) Option {
+	return func(c *Client) {
+		if n > 0 {
+			c.dims = n
 		}
 	}
 }
@@ -163,7 +180,7 @@ func (c *Client) Embed(ctx context.Context, text string) ([]float32, error) {
 	if strings.TrimSpace(text) == "" {
 		return nil, nil // nothing to vectorize; callers treat nil as absent
 	}
-	payload, err := json.Marshal(c.body(c.model, text))
+	payload, err := json.Marshal(c.body(c.model, text, c.dims))
 	if err != nil {
 		return nil, fmt.Errorf("embeddings: encode request: %w", err)
 	}
@@ -219,15 +236,16 @@ func googleAuth(apiKey string) func(*http.Request) {
 	}
 }
 
-// openAIRequest is the shared {model, input} payload.
+// openAIRequest is the shared {model, input, dimensions?} payload.
 type openAIRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model      string   `json:"model"`
+	Input      []string `json:"input"`
+	Dimensions int      `json:"dimensions,omitempty"`
 }
 
 // openAIBody builds the shared OpenAI-shaped payload.
-func openAIBody(model, text string) any {
-	return openAIRequest{Model: model, Input: []string{text}}
+func openAIBody(model, text string, dims int) any {
+	return openAIRequest{Model: model, Input: []string{text}, Dimensions: dims}
 }
 
 // geminiRequest is Gemini's payload shape.
@@ -239,8 +257,9 @@ type geminiRequest struct {
 	} `json:"content"`
 }
 
-// geminiBody builds the Gemini-shaped payload.
-func geminiBody(model, text string) any {
+// geminiBody builds the Gemini-shaped payload. dims is unused here:
+// Gemini fixes the dimension per model.
+func geminiBody(model, text string, dims int) any {
 	var req geminiRequest
 	req.Content.Parts = append(req.Content.Parts, struct {
 		Text string `json:"text"`

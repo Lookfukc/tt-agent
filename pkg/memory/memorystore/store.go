@@ -2,6 +2,7 @@ package memorystore
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/Lookfukc/tt-agent/pkg/core"
@@ -117,6 +118,9 @@ type Store struct {
 	// driver, so a pathologically long session cannot exhaust memory
 	// while assembling a request. 0 means the default.
 	maxScan int
+
+	// cappedReads counts reads that stopped at the maxScan window.
+	cappedReads atomic.Uint64
 }
 
 // defaultMaxScan bounds one read. Sessions far larger than this keep
@@ -171,6 +175,13 @@ func New(driver Driver, opts Options) *Store {
 		maxScan:  maxScan,
 	}
 }
+
+// CappedReads reports how many reads stopped at the maxScan window.
+//
+// A climbing counter means sessions have grown past their read window
+// and their oldest messages are silently out of view — raise
+// Options.MaxScan (or trim/compact sessions) when that matters.
+func (s *Store) CappedReads() uint64 { return s.cappedReads.Load() }
 
 // Driver exposes the underlying driver.
 func (s *Store) Driver() Driver { return s.driver }
@@ -337,6 +348,10 @@ func (s *Store) CountMessages(ctx context.Context, sessionID string) (int, error
 // Records the codec rejects are skipped rather than failing the read:
 // a single corrupt row must not take a session down, matching the
 // corrupt-line tolerance of the file-backed implementation.
+//
+// Reads that stop at the maxScan window increment CappedReads, so
+// operators can tell when sessions have outgrown their window instead
+// of silently losing pre-window context.
 func (s *Store) scan(ctx context.Context, sessionID string, fn func(MessageRecord)) error {
 	count := 0
 	err := s.driver.ScanRecords(ctx, sessionID, func(rec EncodedRecord) error {
@@ -344,6 +359,7 @@ func (s *Store) scan(ctx context.Context, sessionID string, fn func(MessageRecor
 			return cerr
 		}
 		if count >= s.maxScan {
+			s.cappedReads.Add(1)
 			return ErrStopScan
 		}
 		decoded, err := s.codec.DecodeMessage(rec.Data)
