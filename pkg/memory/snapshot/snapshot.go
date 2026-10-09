@@ -71,6 +71,10 @@ type Store struct {
 	prefix   string
 	observer observer.MemoryObserver
 	backend  string
+	// locker, when the driver supports it, excludes other processes
+	// from the same session during multi-step operations.
+	locker   memorystore.SessionLocker
+	lockWait time.Duration
 
 	// maxPerSession bounds retained snapshots per session; the oldest
 	// are dropped first. 0 means the default.
@@ -98,6 +102,11 @@ type Options struct {
 	// Backend labels emitted events; pass the same name the session
 	// store uses so downstream sinks can correlate.
 	Backend string
+
+	// LockWait bounds waiting for the cross-process session lock when
+	// the driver implements memorystore.SessionLocker. <=0 means the
+	// default (5s).
+	LockWait time.Duration
 }
 
 // defaultMaxSnapshots bounds history per session.
@@ -111,7 +120,17 @@ const defaultMaxSnapshots = 20
 // defaultPrefix namespaces snapshot keys apart from message keys.
 const defaultPrefix = "snapshot:"
 
+// defaultLockWait bounds how long a snapshot operation waits for a
+// cross-process session lock held elsewhere.
+const defaultLockWait = 5 * time.Second
+
 // New builds a snapshot store over a driver.
+//
+// When the driver implements memorystore.SessionLocker (Redis,
+// Postgres), every snapshot operation additionally holds that
+// cross-process lock, so capture-then-rollback sequences stay atomic
+// even against other processes sharing the storage. Drivers without
+// the capability are serialized in-process only.
 func New(driver memorystore.Driver, opts Options) *Store {
 	codec := opts.Codec
 	if codec == nil {
@@ -125,14 +144,37 @@ func New(driver memorystore.Driver, opts Options) *Store {
 	if prefix == "" {
 		prefix = defaultPrefix
 	}
+	lockWait := opts.LockWait
+	if lockWait <= 0 {
+		lockWait = defaultLockWait
+	}
+	var locker memorystore.SessionLocker
+	if l, ok := driver.(memorystore.SessionLocker); ok {
+		locker = l
+	}
 	return &Store{
 		driver:        driver,
 		codec:         codec,
 		prefix:        prefix,
 		observer:      opts.Observer,
 		backend:       opts.Backend,
+		locker:        locker,
+		lockWait:      lockWait,
 		maxPerSession: limit,
 	}
+}
+
+// lockDist acquires the cross-process session lock when the driver
+// supports one. The returned undo is a no-op for local-only drivers.
+func (s *Store) lockDist(ctx context.Context, sessionID string) (func(), error) {
+	if s.locker == nil {
+		return func() {}, nil
+	}
+	release, err := s.locker.LockSession(ctx, sessionID, s.lockWait)
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = release() }, nil
 }
 
 // Capture stores the current state of a session.
@@ -143,6 +185,11 @@ func (s *Store) Capture(ctx context.Context, sessionID, label string) (Entry, er
 	if !memorystore.ValidSessionID(sessionID) {
 		return Entry{}, memorystore.ErrInvalidSessionID
 	}
+	undoLock, err := s.lockDist(ctx, sessionID)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer undoLock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	entry, err := s.captureLocked(ctx, sessionID, label)
@@ -241,6 +288,11 @@ func (s *Store) Rollback(ctx context.Context, sessionID, snapshotID string) (Ent
 	if !memorystore.ValidSessionID(sessionID) {
 		return Entry{}, memorystore.ErrInvalidSessionID
 	}
+	undoLock, err := s.lockDist(ctx, sessionID)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer undoLock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	target, err := s.load(ctx, sessionID, snapshotID)
@@ -292,7 +344,10 @@ func (s *Store) restoreLocked(ctx context.Context, sessionID string, target reco
 // The whole operation is serialized per store: without the lock, a
 // concurrent Add between the capture and the rollback would be
 // discarded without any snapshot holding it — exactly the data loss
-// this method exists to prevent.
+// this method exists to prevent. On shared-storage drivers (Redis,
+// Postgres) that serialization extends across processes through the
+// driver's SessionLocker; on drivers without it (SQLite, file), the
+// guarantee holds within one process only.
 //
 // A missing rollback target fails before the safety capture, so a
 // mistyped ID cannot litter the snapshot log with pointless entries.
@@ -300,6 +355,11 @@ func (s *Store) RollbackSafe(ctx context.Context, sessionID, snapshotID, safetyL
 	if !memorystore.ValidSessionID(sessionID) {
 		return Entry{}, Entry{}, memorystore.ErrInvalidSessionID
 	}
+	undoLock, err := s.lockDist(ctx, sessionID)
+	if err != nil {
+		return Entry{}, Entry{}, err
+	}
+	defer undoLock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
