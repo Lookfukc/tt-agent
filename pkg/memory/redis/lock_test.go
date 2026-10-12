@@ -152,7 +152,7 @@ func TestLockReleaseIsTokenSafe(t *testing.T) {
 		t.Fatalf("A lock: %v", err)
 	}
 	// 模拟 A 的租约到期：服务端直接清键（真实场景由 PX TTL 完成）
-	f.srv.Del("agent:mem:s:lock")
+	f.srv.Del("agent:mem:{s}:lock")
 	_ = releaseA() // 迟到的释放：token 已不匹配，必须是空操作
 
 	releaseB, err := f.drvB.LockSession(ctx, "s", 0)

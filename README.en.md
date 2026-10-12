@@ -842,13 +842,15 @@ mem = memory.NewTTL(ctx, mem, 30*time.Minute, 5*time.Minute)
 
 | Backend | Keys / tables | Retention |
 |---|---|---|
-| Redis | `agent:mem:{id}` (LIST), `:system` (LIST), `:sum` (STRING) | Native `EXPIRE` (`SessionTTL`) |
+| Redis | `agent:mem:{sessionID}` (LIST), `{sessionID}:system` (LIST), `{sessionID}:sum` (STRING) — `{...}` is a **hash tag** | Native `EXPIRE` (`SessionTTL`) |
 | SQLite | `agent_messages` / `agent_summaries` tables | Call `PruneIdleSessions(idle)` on a timer |
 | Postgres | Same tables (isolated per schema) | Call `PruneIdleSessions(idle)` on a timer |
 
 > **Why Redis keeps two lists:** the parallel `system` list records which entries are system messages, so `Trim` can locate the oldest *non-system* messages without decrypting or parsing every message (system messages are never trimmed). The cost is that writes go through a pipeline to keep both lists the same length.
 >
 > **Trim atomicity:** the whole trim runs as a Lua script on the Redis server's single thread. A client-side read-rebuild-rename implementation has a lost-update race — a message appended by another process between the LRANGE and the RENAME is silently swallowed by the rename. While a script executes, no other command can interleave, so a concurrent `Add` lands entirely before or entirely after a trim.
+>
+> **Redis Cluster support:** the session ID sits inside a hash tag (`{sessionID}`), so every key a session owns (messages / system flags / summary / lock / snapshots) hashes to the **same slot** — the Lua trim script and the multi-key `DEL` never hit `CROSSSLOT` on a sharded cluster. Standalone, primary-replica with Sentinel, and Cluster topologies all work; `redis.New` accepts go-redis's `UniversalClient` (including `NewClusterClient` / `NewFailoverClient`). Note that the tagged key format means pre-upgrade keys become invisible after upgrading (no migration) — fine for new projects, or ones that can drain Redis.
 
 ### Encryption at Rest
 

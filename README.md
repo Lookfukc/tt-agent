@@ -839,13 +839,15 @@ mem = memory.NewTTL(ctx, mem, 30*time.Minute, 5*time.Minute)
 
 | 后端 | 键/表结构 | 清理方式 |
 |---|---|---|
-| Redis | `agent:mem:{id}` (LIST)、`:system` (LIST)、`:sum` (STRING) | 原生 `EXPIRE`（`SessionTTL`） |
+| Redis | `agent:mem:{会话ID}` (LIST)、`{会话ID}:system` (LIST)、`{会话ID}:sum` (STRING)——`{...}` 是 **hash tag** | 原生 `EXPIRE`（`SessionTTL`） |
 | SQLite | `agent_messages` / `agent_summaries` 两表 | `PruneIdleSessions(idle)` 定时调用 |
 | Postgres | 同 SQLite（按 schema 隔离） | `PruneIdleSessions(idle)` 定时调用 |
 
 > **为什么 Redis 用两个 LIST**：`system` 平行列表记录「哪条是系统消息」。这样 `Trim` 就能在不解密、不解析全部消息的前提下定位最旧的**非系统**消息（系统消息永不删除）。代价是写入走 pipeline 保证两个列表等长。
 >
 > **Trim 的原子性**：整个修剪作为 Lua 脚本在 Redis 服务端单线程执行。客户端"读→重建→改名"的实现存在丢失更新竞态——LRANGE 与 RENAME 之间别的进程追加的消息会被改名覆盖吞掉。服务端脚本执行期间没有其他命令能插入，并发 `Add` 要么完整落在修剪前、要么完整落在修剪后。
+>
+> **Redis Cluster 支持**：会话 ID 包在 hash tag（`{会话ID}`）里，一个会话的全部键（消息/系统标记/摘要/锁/快照）哈希到**同一 slot**——Lua 修剪脚本与多键 `DEL` 在分片集群下不会 `CROSSSLOT`。单机、主从+哨兵、Cluster 三种拓扑均可直接使用；`redis.New` 接受 `go-redis` 的 `UniversalClient`（含 `NewClusterClient` / `NewFailoverClient`）。注意键格式带 tag 意味着升级版本后旧键不可见（无迁移），新项目或可接受清空的项目直接升级即可。
 
 ### 加密存储
 

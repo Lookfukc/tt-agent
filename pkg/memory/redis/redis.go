@@ -90,13 +90,23 @@ func (d *Driver) Memory(opts memorystore.Options) *memorystore.Store {
 }
 
 // key returns the message-list key for a session.
-func (d *Driver) key(sessionID string) string { return d.prefix + sessionID }
+//
+// The session ID is wrapped in a hash tag ({...}) so every key a
+// session owns hashes to the same Redis Cluster slot. Without the
+// tag, the Lua trim script and the multi-key DEL would fail with
+// CROSSSLOT on any sharded deployment. Snapshot stores ride the same
+// driver with derived session IDs, so their keys inherit the tag too.
+func (d *Driver) key(sessionID string) string { return d.prefix + "{" + sessionID + "}" }
 
 // systemKey returns the parallel system-flag list key.
-func (d *Driver) systemKey(sessionID string) string { return d.prefix + sessionID + ":system" }
+func (d *Driver) systemKey(sessionID string) string {
+	return d.prefix + "{" + sessionID + "}:system"
+}
 
 // summaryKey returns the summary key.
-func (d *Driver) summaryKey(sessionID string) string { return d.prefix + sessionID + ":sum" }
+func (d *Driver) summaryKey(sessionID string) string {
+	return d.prefix + "{" + sessionID + "}:sum"
+}
 
 // AppendRecords implements memorystore.Driver.
 //

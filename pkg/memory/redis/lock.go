@@ -36,7 +36,13 @@ return 0
 `)
 
 // lockKey returns the advisory-lock key for a session.
-func (d *Driver) lockKey(sessionID string) string { return d.prefix + sessionID + ":lock" }
+//
+// The session ID keeps its hash tag so the lock shares the slot with
+// the session's data — single-key commands are cluster-safe either
+// way, but locality keeps lock + data lifecycle on one node.
+func (d *Driver) lockKey(sessionID string) string {
+	return d.prefix + "{" + sessionID + "}:lock"
+}
 
 // LockSession implements memorystore.SessionLocker.
 //
