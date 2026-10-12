@@ -171,10 +171,14 @@ const (
 )
 
 // Usage is the token usage accounting.
+// Usage aggregates token accounting for one call or one run.
+//
+// The JSON tags are part of the public wire contract (pinned by
+// test/json_contract_test.go); changing them is a breaking change.
 type Usage struct {
-	InputTokens     int64
-	OutputTokens    int64
-	ReasoningTokens int64
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	ReasoningTokens int64 `json:"reasoning_tokens,omitempty"`
 }
 
 // Total returns the total output tokens, including the thinking portion.

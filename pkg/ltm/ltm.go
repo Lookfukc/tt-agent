@@ -23,28 +23,31 @@ import (
 )
 
 // Fact is one remembered statement about a subject.
+//
+// The JSON tags are part of the public wire contract (pinned by
+// test/json_contract_test.go); changing them is a breaking change.
 type Fact struct {
 	// ID uniquely identifies the fact within its namespace.
-	ID string
+	ID string `json:"id"`
 
 	// Namespace isolates facts by owner — typically a user ID, tenant
 	// ID, or agent ID. Recalls never cross namespaces.
-	Namespace string
+	Namespace string `json:"namespace"`
 
 	// Text is the fact itself, in natural language.
-	Text string
+	Text string `json:"text"`
 
 	// Metadata carries caller-defined attributes (source session,
 	// category, confidence, ...). It is stored verbatim.
-	Metadata map[string]string
+	Metadata map[string]string `json:"metadata,omitempty"`
 
 	// CreatedAt and UpdatedAt are set by the Store.
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 
 	// Score is the relevance of this fact to the query that produced
 	// it. Zero for facts that were not returned from a search.
-	Score float64
+	Score float64 `json:"score,omitempty"`
 }
 
 // Store persists and recalls facts.
@@ -118,9 +121,9 @@ func (f ExtractorFunc) Extract(ctx context.Context, msgs []Message) ([]string, e
 // who said what, and decoupling keeps this package dependency-free.
 type Message struct {
 	// Role is one of "system", "user", "assistant", "tool".
-	Role string
+	Role string `json:"role"`
 	// Content is the message text.
-	Content string
+	Content string `json:"content"`
 }
 
 // Memory is the facade that ties extraction, embedding and storage
