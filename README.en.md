@@ -1112,6 +1112,139 @@ mem = memory.NewCompactingSummary(mem, cheapLLM)
 srv := entry.NewServer(reg, toolReg)
 ```
 
+### Production Assembly: the Whole Memory Subsystem in One Place
+
+The sections above introduce the parts — drivers, snapshots, long-term memory, the event bus. In production they form one whole: **one Redis driver feeds both session memory and snapshots** (shared storage and cross-process locks), **one event bus observes all three subsystems**, and pgvector plus an embedder makes up long-term memory. Below is the complete assembly verified end-to-end by a real consumer project (Redis + pgvector + two LLM vendors, 22 API tests):
+
+```go
+// ============================================================
+// 1. Event bus: async, non-blocking, panicking observers are
+//    isolated — build it first, everything else hangs off it
+// ============================================================
+bus := observer.NewMemoryEventBus(256, myLogSink /* optional webhook forwarder */)
+defer bus.Close()
+
+// ============================================================
+// 2. Session memory + snapshots: two views over one Redis driver
+// ============================================================
+driver := redis.New(redisClient, redis.Options{
+	Prefix:     "myapp:mem:",   // key prefix: isolates apps sharing one Redis
+	SessionTTL: 24 * time.Hour, // idle sessions expire Redis-side, no sweeper needed
+})
+
+// Startup self-check: surface config errors here, not on the first
+// user request
+mem := memorystore.New(driver, memorystore.Options{
+	Observer: bus,
+	Backend:  "redis", // labels events; helps when multiple backends exist
+})
+if err := mem.Add(ctx, "startup-probe", core.Text("ping")); err != nil {
+	log.Fatalf("redis self-check failed: %v", err)
+}
+_ = mem.Clear(ctx, "startup-probe")
+
+// Snapshots wrap the same driver: shared storage, cross-process
+// locks engage automatically (Redis SET NX + token-checked release)
+snaps := snapshot.New(driver, snapshot.Options{
+	Observer:      bus,
+	Backend:       "redis",
+	MaxPerSession: 20,              // per-session cap, oldest evicted beyond it
+	LockWait:      5 * time.Second, // how long concurrent rollbacks wait for the lock
+})
+
+// ============================================================
+// 3. Long-term memory: pgvector + embedder (dimensions must match!)
+// ============================================================
+pool, _ := pgxpool.New(ctx, pgDSN)
+if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS "agent_ltm"`); err != nil {
+	return err // Migrate does not create schemas — you must
+}
+vecStore, err := pgvector.New(pool, pgvector.Options{
+	Dim:    768, // ← must equal the embedder's output dimension (see warnings)
+	Schema: "agent_ltm",
+})
+if err != nil {
+	return err
+}
+if err := vecStore.Migrate(ctx); err != nil { // tables + CREATE EXTENSION vector, idempotent
+	return err
+}
+
+emb := embeddings.NewOpenAICompatible(
+	"http://ollama:11434/v1", // ollama's OpenAI-compatible endpoint; any compatible service works
+	"ollama",                 // ollama ignores the key; placeholder is fine
+	"nomic-embed-text",
+)
+
+ltmMem := ltm.New(vecStore, ltm.Options{
+	Embedder:     emb, // nil keeps keyword-only recall (fine small, worse at scale)
+	Extractor:    extractor.New(chatLLM, extractor.Options{Lenient: true}),
+	DefaultLimit: 5,   // default Recall size when the caller passes none
+	Observer:     bus,
+	Backend:      "pgvector",
+})
+
+// ============================================================
+// 4. Assembly complete. The corresponding startup log:
+// ============================================================
+// session memory: redis prefix=myapp:mem: ttl=24h0m0s
+// snapshots + safe rollback: enabled (cross-process locks)
+// long-term memory: backend=pgvector embedder=nomic-embed-text dim=768
+```
+
+#### Parameter Quick Reference
+
+**`redis.Options`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `Prefix` | `agent:mem:` | Prefix on every key; isolates apps sharing one Redis |
+| `SessionTTL` | `0` (never) | When positive, refreshed on each append; Redis expires idle sessions itself |
+
+**`memorystore.Options`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `Codec` | `JSONCodec` | The codec layer; swap in `EncryptedCodec` for encryption at rest |
+| `Counter` | built-in estimator | Token counter; plug a vendor-accurate one for token-accurate budgets |
+| `MaxScan` | `20000` | Max records one read may scan; defends against unbounded sessions |
+| `Observer` | `nil` | Memory-event observer (a bus is recommended) |
+| `Backend` | `""` | Source label on events; helps debugging mixed backends |
+
+**`snapshot.Options`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `MaxPerSession` | `50` | Per-session snapshot cap; oldest evicted beyond it |
+| `Prefix` | `agent:snap:` | Snapshot key prefix |
+| `LockWait` | `5s` | Cross-process lock wait cap; beyond it `ErrLockTimeout`, never infinite blocking |
+| `Codec` / `Observer` / `Backend` | — | Same semantics as `memorystore.Options` |
+
+**`ltm.Options`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `Embedder` | `nil` | Vectorizer; `nil` keeps keyword-only recall |
+| `Extractor` | `nil` | The `Learn` extractor; `nil` makes `Learn` return empty |
+| `DefaultLimit` | `5` | Default `Recall` size |
+| `Observer` / `Backend` | — | Event observation and source label |
+
+**`pgvector.Options`**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `Dim` | **required** | Vector dimension; fixed once the table exists |
+| `Schema` | `public` | Table namespace; **you must create it** (`Migrate` creates tables, not schemas) |
+| `MaxKeywordScan` | `1000` | Cap for the keyword fallback scan |
+
+#### Three Pitfalls from the Field (stepped on by the consumer project)
+
+> **⚠️ Pitfall 1: `Dim` must equal the embedder model's output dimension.** `nomic-embed-text` is 768; OpenAI `text-embedding-3-small` is 1536. A wrong value fails silently until the first write: `ERROR: expected 768 dimensions, not 1536 (SQLSTATE 22000)`.
+>
+> **⚠️ Pitfall 2: switching embedder models means dropping and recreating the table.** The dimension is fixed at table creation. After moving to a model with a different dimension, `DROP SCHEMA ... CASCADE` and let `Migrate` rebuild — otherwise every write fails on the dimension mismatch.
+>
+> **⚠️ Pitfall 3: create the schema yourself.** `Migrate` runs `CREATE EXTENSION vector` and creates tables, but **does not create schemas**. For anything outside `public`, run `CREATE SCHEMA IF NOT EXISTS` first.
+
 ### tools package
 
 #### `tools.Registry`

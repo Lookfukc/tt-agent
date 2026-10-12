@@ -1120,6 +1120,136 @@ mem = memory.NewCompactingSummary(mem, cheapLLM)
 srv := entry.NewServer(reg, toolReg)
 ```
 
+### 生产总装：记忆子系统一次装齐
+
+上面各节分别介绍了零件——驱动、快照、长期记忆、事件总线。生产里它们是一个整体：**同一个 Redis 驱动同时喂会话记忆和快照**（共享存储与跨进程锁），**同一条事件总线挂全部三个子系统**，pgvector 加 embedder 组成长期记忆。下面是经过真实消费者项目全量验证的完整装配（Redis + pgvector + 双厂商 LLM，含 22 个接口测试）：
+
+```go
+// ============================================================
+// 1. 事件总线：异步、非阻塞、观察者 panic 被隔离——先建，后面全挂它
+// ============================================================
+bus := observer.NewMemoryEventBus(256, myLogSink /* 可选的 webhook 转发器 */)
+defer bus.Close()
+
+// ============================================================
+// 2. 会话记忆 + 快照：同一个 Redis 驱动的两个视图
+// ============================================================
+driver := redis.New(redisClient, redis.Options{
+	Prefix:     "myapp:mem:",      // 键前缀：多应用共享一个 Redis 时互不干扰
+	SessionTTL: 24 * time.Hour,    // 空闲会话由 Redis 原生过期，无需清扫协程
+})
+
+// 启动自检：配置错误在这里暴露，而不是第一次用户请求
+mem := memorystore.New(driver, memorystore.Options{
+	Observer: bus,
+	Backend:  "redis",             // 事件里标注来源，多后端时排障用
+})
+if err := mem.Add(ctx, "startup-probe", core.Text("ping")); err != nil {
+	log.Fatalf("Redis 自检失败: %v", err)
+}
+_ = mem.Clear(ctx, "startup-probe")
+
+// 快照直接包同一个驱动：共享存储，跨进程锁自动生效（Redis SET NX + token 释放）
+snaps := snapshot.New(driver, snapshot.Options{
+	Observer:      bus,
+	Backend:       "redis",
+	MaxPerSession: 20,             // 每会话快照上限，超出自动淘汰最旧
+	LockWait:      5 * time.Second, // 并发回滚时等待锁的最长时间
+})
+
+// ============================================================
+// 3. 长期记忆：pgvector 向量库 + embedder（维度必须匹配！）
+// ============================================================
+pool, _ := pgxpool.New(ctx, pgDSN)
+if _, err := pool.Exec(ctx, `CREATE SCHEMA IF NOT EXISTS "agent_ltm"`); err != nil {
+	return err // Migrate 不会建 schema，必须先建
+}
+vecStore, err := pgvector.New(pool, pgvector.Options{
+	Dim:    768,            // ← 必须等于 embedder 模型的输出维度（见下方警告）
+	Schema: "agent_ltm",
+})
+if err != nil {
+	return err
+}
+if err := vecStore.Migrate(ctx); err != nil { // 建表 + CREATE EXTENSION vector，幂等
+	return err
+}
+
+emb := embeddings.NewOpenAICompatible(
+	"http://ollama:11434/v1", // ollama 的 OpenAI 兼容端点；任何兼容服务均可
+	"ollama",                 // ollama 不校验 key，占位即可
+	"nomic-embed-text",
+)
+
+ltmMem := ltm.New(vecStore, ltm.Options{
+	Embedder:     emb,   // nil 则纯关键词召回（小规模可用，大库召回质量下降）
+	Extractor:    extractor.New(chatLLM, extractor.Options{Lenient: true}),
+	DefaultLimit: 5,     // Recall 未指定 limit 时的默认条数
+	Observer:     bus,
+	Backend:      "pgvector",
+})
+
+// ============================================================
+// 4. 装配完成。对应的启动日志：
+// ============================================================
+// 会话记忆: redis prefix=myapp:mem: ttl=24h0m0s
+// 快照与安全回滚: 已启用（跨进程锁）
+// 长期记忆: backend=pgvector embedder=nomic-embed-text dim=768
+```
+
+#### 参数速查表
+
+**`redis.Options`**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `Prefix` | `agent:mem:` | 每个键的前缀；多应用共享一个 Redis 时用它隔离命名空间 |
+| `SessionTTL` | `0`（永不过期） | 正值时每次写入刷新 `EXPIRE`，空闲会话由 Redis 自己回收 |
+
+**`memorystore.Options`**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `Codec` | `JSONCodec` | 编解码层；换 `EncryptedCodec` 即获得静态加密 |
+| `Counter` | 内置估算器 | token 计数器；接厂商精确计数可实现按 token 计费 |
+| `MaxScan` | `20000` | 单次读取最多扫描的记录数，防御超长会话拖垮读取 |
+| `Observer` | `nil` | 记忆事件观察者（建议挂总线） |
+| `Backend` | `""` | 事件里的来源标注，多后端排障用 |
+
+**`snapshot.Options`**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `MaxPerSession` | `50` | 每会话快照上限，超出淘汰最旧 |
+| `Prefix` | `agent:snap:` | 快照键前缀 |
+| `LockWait` | `5s` | 跨进程锁的等待上限；超时返回 `ErrLockTimeout` 而非无限阻塞 |
+| `Codec` / `Observer` / `Backend` | 同上 | 与 `memorystore.Options` 语义一致 |
+
+**`ltm.Options`**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `Embedder` | `nil` | 向量化器；`nil` 纯关键词召回 |
+| `Extractor` | `nil` | `Learn` 的抽取器；`nil` 时 `Learn` 直接返回空 |
+| `DefaultLimit` | `5` | `Recall` 的默认条数 |
+| `Observer` / `Backend` | 同上 | 事件观察与来源标注 |
+
+**`pgvector.Options`**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `Dim` | **必填** | 向量维度，建表后固定不变 |
+| `Schema` | `public` | 表所在 schema；**需先自行创建**（`Migrate` 只建表不建 schema） |
+| `MaxKeywordScan` | `1000` | 关键词降级时最多扫描的事实数 |
+
+#### 三个实战坑（消费者项目亲踩）
+
+> **⚠️ 坑 1：`Dim` 必须等于 embedder 模型的输出维度。** `nomic-embed-text` 是 768，OpenAI `text-embedding-3-small` 是 1536。填错不报错——直到第一次写入才炸：`ERROR: expected 768 dimensions, not 1536 (SQLSTATE 22000)`。
+>
+> **⚠️ 坑 2：换 embedder 模型 = 删表重建。** 维度建表时固定。换了不同维度的模型后，`DROP SCHEMA ... CASCADE` 再让 `Migrate` 重建，否则所有写入都因维度不匹配失败。
+>
+> **⚠️ 坑 3：schema 必须先建。** `Migrate` 会 `CREATE EXTENSION vector` 和建表，但**不会建 schema**。非 `public` 的 schema 需要自己先 `CREATE SCHEMA IF NOT EXISTS`。
+
 ### tools 包
 
 #### `tools.Registry`
