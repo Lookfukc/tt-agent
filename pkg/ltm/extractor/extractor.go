@@ -98,7 +98,11 @@ func (e *LLMExtractor) extract(ctx context.Context, msgs []ltm.Message) ([]strin
 		return nil, nil
 	}
 	resp, err := e.llm.Chat(ctx, core.ChatRequest{
-		Model: "extractor",
+		// Model left empty on purpose: the adapter fills the provider's
+		// default model. Hardcoding a name here once sent "extractor"
+		// to the wire, which strict providers (DeepSeek) reject with
+		// a 400 — found by the demo consumer on day one.
+		Model: "",
 		Messages: []core.Message{
 			{Role: core.RoleSystem, Content: e.prompt},
 			{Role: core.RoleUser, Content: body},
