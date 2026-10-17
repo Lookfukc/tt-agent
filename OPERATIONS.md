@@ -1,7 +1,7 @@
 # tt-agent 操作文档（OPERATIONS.md）
 
 > 面向使用者的完整操作手册：环境准备 → 零代码跑服务 → **Gin 完整集成（从零搭出 agent-demo）** → 四种记忆后端 → 快照时间旅行 → 长期记忆 → 观测 → 运维排查。
-> 姊妹文档：[README.md](README.md)（框架总览与 API 参考）。
+> 总文档：[README.md](README.md)（框架总览与 API 参考）。
 > 配套实战工程：agent-demo（Gin + Redis + pgvector + swaggo，本文第 4 章逐步搭出的就是它）。
 
 **目录**
