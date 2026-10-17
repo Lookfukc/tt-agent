@@ -5,12 +5,17 @@
 [![CI](https://github.com/Lookfukc/tt-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/Lookfukc/tt-agent/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/Lookfukc/tt-agent.svg)](https://pkg.go.dev/github.com/Lookfukc/tt-agent)
 
+> 🔧 **操作手册**：[OPERATIONS.md](OPERATIONS.md) —— 环境准备、跑服务、接口调用（REST/SSE/WS/gRPC）、
+> 配置参数、Docker 依赖、记忆后端切换、pgvector 长期记忆、运维排查，含
+> [agent-demo](https://github.com/Lookfukc/agent-demo) 实战示例的完整接口清单。
+
 基于 Go 实现的多协议 LLM Agent 框架。统一内部消息类型，协议适配层兼容 **OpenAI / Anthropic / Gemini** 三家协议及一切 OpenAI-compatible 提供商（DeepSeek、GLM、Kimi、本地 ollama / vLLM……）。
 
 - [功能总览](#功能总览)
 - [环境要求](#环境要求)
 - [安装](#安装)
 - [快速开始](#快速开始)
+- [操作手册 OPERATIONS.md（跑服务/调接口/配置/运维）](OPERATIONS.md)
 - [核心概念](#核心概念)
 - [教程：从零装配一个 Agent](#教程从零装配一个-agent)
 - [API 参考](#api-参考)
